@@ -38,7 +38,10 @@ android {
                 storePassword = keystoreProperties["storePassword"] as String
                 keyAlias = keystoreProperties["keyAlias"] as String
                 keyPassword = keystoreProperties["keyPassword"] as String
-            }
+              } else {
+                // This helps you debug! If the file isn't found, the build will fail here with a clear message
+                throw GradleException("Could not find keystore.properties at: ${keystorePropertiesFile.absolutePath}")
+              }
         }
     }
     
