@@ -1,7 +1,7 @@
 // Task aggregation for patto-mobile
 // Gathers tasks from all notes and categorizes by deadline
 
-use chrono::{Local, NaiveDate, NaiveDateTime};
+use chrono::{Local, NaiveDate};
 use patto::parser::{
     self, AstNode, AstNodeKind, Deadline, Property, TaskStatus as PattoTaskStatus,
 };
@@ -59,8 +59,8 @@ pub async fn get_all_tasks(root: PathBuf) -> Result<TaskAggregation, String> {
                             // Categorize by deadline
                             match &task.due_timestamp {
                                 Some(ts) => {
-                                    let due_date = NaiveDateTime::from_timestamp_opt(*ts, 0)
-                                        .map(|dt| dt.date())
+                                    let due_date = chrono::DateTime::from_timestamp(*ts, 0)
+                                        .map(|dt| dt.naive_utc().date())
                                         .unwrap_or(today);
 
                                     if due_date < today {

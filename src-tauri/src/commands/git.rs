@@ -2,8 +2,7 @@
 // Using git2 crate with HTTPS + Personal Access Token authentication
 
 use git2::{
-    build::RepoBuilder, Cred, Direction, FetchOptions, PushOptions, RemoteCallbacks, Repository,
-    Signature,
+    build::RepoBuilder, Cred, FetchOptions, PushOptions, RemoteCallbacks, Repository, Signature,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
