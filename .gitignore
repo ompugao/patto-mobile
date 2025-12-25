@@ -25,7 +25,7 @@ dist-ssr
 
 # Rust/Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
+# src-tauri/Cargo.lock
 
 # Android
 src-tauri/gen/android/.gradle/
