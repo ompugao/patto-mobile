@@ -63,7 +63,15 @@ jobs:
         run: pnpm install
       - name: Build Android
         run: |
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          # The NDK toolchain is at $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          # We need to set up the environment for openssl-sys to find the cross-compiler tools
+          export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
+          # For aarch64-linux-android
+          export AR=llvm-ar
+          export RANLIB=llvm-ranlib
+          export CC=aarch64-linux-android24-clang
+          export CXX=aarch64-linux-android24-clang++
           pnpm tauri android build -- --no-bundle
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-android.outputs.ndk-path }}
@@ -92,4 +100,11 @@ jobs:
       - name: Initialize iOS
         run: pnpm tauri ios init
       - name: Build iOS
-        run: pnpm tauri ios build -- --no-bundle -- CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+        run: |
+          pnpm tauri ios build -- --no-bundle -- \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM="DUMMYTEAMID"
