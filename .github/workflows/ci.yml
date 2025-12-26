@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -46,7 +46,10 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
       - name: Setup Android SDK
+        id: setup-android
         uses: android-actions/setup-android@v3
+        with:
+          ndk-version: '27.0.12077973'
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -55,6 +58,8 @@ jobs:
         run: pnpm install
       - name: Build Android
         run: pnpm tauri android build -- --no-bundle
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-android.outputs.ndk-path }}
 
   build-ios:
     runs-on: macos-latest
@@ -78,3 +83,7 @@ jobs:
         run: pnpm tauri ios init
       - name: Build iOS
         run: pnpm tauri ios build -- --no-bundle
+        env:
+          CODE_SIGNING_ALLOWED: NO
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGN_IDENTITY: ""
