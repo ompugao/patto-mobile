@@ -62,6 +62,7 @@ jobs:
       - name: Build Android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_AR: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_CC: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
@@ -99,7 +100,7 @@ jobs:
         run: pnpm tauri ios init
       - name: Build iOS
         run: |
-          pnpm tauri ios build --target aarch64-sim --verbose -- \
+          pnpm tauri ios build --target aarch64-sim -- \
             -sdk iphonesimulator \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -107,5 +108,4 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEVELOPMENT_TEAM="DUMMYTEAMID" \
-            CODE_SIGN_STYLE=Manual \
-            -verbose
+            CODE_SIGN_STYLE=Manual
