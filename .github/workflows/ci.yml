@@ -59,6 +59,10 @@ jobs:
           ls -F $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ | grep ranlib || true
       - name: Install dependencies
         run: pnpm install
+      - name: Create keystore.properties for Android build
+        run: |
+          mkdir -p src-tauri/gen/android
+          touch src-tauri/gen/android/keystore.properties
       - name: Build Android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
@@ -100,7 +104,7 @@ jobs:
         run: pnpm tauri ios init
       - name: Build iOS
         run: |
-          pnpm tauri ios build --target aarch64-sim -- \
+          pnpm tauri ios build --target aarch64-sim --quiet -- \
             -sdk iphonesimulator \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
