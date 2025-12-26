@@ -57,7 +57,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install
       - name: Build Android
-        run: pnpm tauri android build -- --no-bundle
+        run: |
+          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          pnpm tauri android build -- --no-bundle
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-android.outputs.ndk-path }}
 
@@ -82,8 +84,4 @@ jobs:
       - name: Initialize iOS
         run: pnpm tauri ios init
       - name: Build iOS
-        run: pnpm tauri ios build -- --no-bundle
-        env:
-          CODE_SIGNING_ALLOWED: NO
-          CODE_SIGNING_REQUIRED: NO
-          CODE_SIGN_IDENTITY: ""
+        run: pnpm tauri ios build -- --no-bundle -- CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
