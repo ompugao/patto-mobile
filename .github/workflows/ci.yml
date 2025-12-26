@@ -65,9 +65,13 @@ jobs:
           export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
           
-          # We need to set up the environment specifically for the target
-          # openssl-sys uses these to find the cross-compiler
+          # openssl-sys and other crates often need these specific target-prefixed variables
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android24-clang
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=llvm-ar
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_CC=aarch64-linux-android24-clang
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB=llvm-ranlib
+          
+          # Also set generic ones for robustness
           export AR_aarch64_linux_android=llvm-ar
           export CC_aarch64_linux_android=aarch64-linux-android24-clang
           export RANLIB_aarch64_linux_android=llvm-ranlib
