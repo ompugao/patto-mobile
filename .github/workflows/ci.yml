@@ -44,8 +44,10 @@ jobs:
           java-version: '17'
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-      - name: Install NDK
-        run: sdkmanager "ndk;26.1.10909125"
+      - name: Install NDK and SDK
+        run: |
+          sdkmanager "ndk;26.1.10909125" "platforms;android-36" "build-tools;35.0.0"
+          yes | sdkmanager --licenses
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,10 +58,15 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev perl make
       - name: Install dependencies
         run: pnpm install
-      - name: Create keystore.properties for Android build
+      - name: Create dummy keystore for Android build
         run: |
-          mkdir -p src-tauri/gen/android
-          touch src-tauri/gen/android/keystore.properties
+          mkdir -p src-tauri/gen/android/app
+          cd src-tauri/gen/android/app
+          keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias android -dname "CN=Android,O=Android,C=US" -storepass android -keypass android
+          echo "storeFile=release.jks" > ../keystore.properties
+          echo "storePassword=android" >> ../keystore.properties
+          echo "keyAlias=android" >> ../keystore.properties
+          echo "keyPassword=android" >> ../keystore.properties
       - name: Build Android
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
