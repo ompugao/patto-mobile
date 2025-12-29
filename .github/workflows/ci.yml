@@ -36,27 +36,23 @@ jobs:
         with:
           node-version: lts/*
           cache: 'pnpm'
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
       - name: Setup Android SDK
-        id: setup-android
         uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;26.1.10909125"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          ndk-version: '26.3.11579264'
+          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev perl make
-      - name: Diagnostic - List NDK binaries
-        run: |
-          ls -F $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ | grep ranlib || true
       - name: Install dependencies
         run: pnpm install
       - name: Create keystore.properties for Android build
@@ -65,19 +61,8 @@ jobs:
           touch src-tauri/gen/android/keystore.properties
       - name: Build Android
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_AR: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_CC: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
-          AR_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          RANLIB_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
-        run: |
-          # Prepend NDK toolchain to PATH
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          pnpm tauri android build
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: pnpm tauri android build --target aarch64-linux-android
 
   build-ios:
     runs-on: macos-latest
