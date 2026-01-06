@@ -10,7 +10,7 @@ export function FileList() {
         setSortBy,
         openNote,
         isLoadingFiles,
-        setView,
+        navigateTo,
         gitSync,
         isGitSyncing,
     } = useStore();
@@ -39,14 +39,14 @@ export function FileList() {
                         <span className={isGitSyncing ? 'spinning' : ''}>↻</span>
                     </button>
                     <button
-                        onClick={() => setView(View.TASKS)}
+                        onClick={() => navigateTo(View.TASKS)}
                         className="icon-btn"
                         title="View Tasks"
                     >
                         ☑
                     </button>
                     <button
-                        onClick={() => setView(View.GIT_CONFIG)}
+                        onClick={() => navigateTo(View.GIT_CONFIG)}
                         className="icon-btn"
                         title="Git Settings"
                     >

@@ -11,7 +11,7 @@ export function NoteEditor() {
         setNoteContent,
         saveNote,
         toggleEdit,
-        closeNote,
+        goBack,
     } = useStore();
 
     const textareaRef = useRef(null);
@@ -55,7 +55,7 @@ export function NoteEditor() {
     return (
         <div className="note-editor">
             <header className="editor-header">
-                <button className="back-btn" onClick={closeNote}>
+                <button className="back-btn" onClick={goBack}>
                     ← Back
                 </button>
                 <h1 className="editor-title">{noteName}</h1>
