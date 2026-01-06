@@ -12,7 +12,7 @@ export function NoteView() {
         currentNote,
         renderedHtml,
         toggleEdit,
-        closeNote,
+        goBack,
         openNote,
     } = useStore();
 
@@ -192,7 +192,7 @@ export function NoteView() {
     return (
         <div className="note-view">
             <header className="note-header">
-                <button className="back-btn" onClick={closeNote}>← Back</button>
+                <button className="back-btn" onClick={goBack}>← Back</button>
                 <h1 className="note-title">{noteName}</h1>
                 <button className="edit-btn" onClick={toggleEdit}>Edit</button>
             </header>

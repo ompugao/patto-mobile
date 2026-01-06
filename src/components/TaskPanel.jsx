@@ -9,7 +9,7 @@ export function TaskPanel() {
         tasks,
         isLoadingTasks,
         loadTasks,
-        setView,
+        goBack,
         openNote,
     } = useStore();
 
@@ -53,7 +53,7 @@ export function TaskPanel() {
     return (
         <div className="task-panel">
             <header className="task-header">
-                <button className="back-btn" onClick={() => setView(View.FILE_LIST)}>
+                <button className="back-btn" onClick={goBack}>
                     ← Back
                 </button>
                 <h1>Tasks</h1>
