@@ -5,23 +5,14 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
+import { callSaveContext, callOnLeave, callOnEnter } from './viewHooks';
+import { View, SortBy } from './constants';
 
-// Views
-export const View = {
-    FILE_LIST: 'file_list',
-    NOTE_VIEW: 'note_view',
-    NOTE_EDIT: 'note_edit',
-    TASKS: 'tasks',
-    GIT_CONFIG: 'git_config',
-};
+// Re-export for backwards compatibility
+export { View, SortBy };
 
-// Sort options
-export const SortBy = {
-    LAST_MODIFIED: 'lastModified',
-    LAST_CREATED: 'lastCreated',
-    MOST_LINKED: 'mostLinked',
-    ALPHABETICAL: 'alphabetical',
-};
+// Import hooks to register them (must be after View is available)
+import './noteHooks';
 
 export const useStore = create(
     persist(
@@ -78,49 +69,34 @@ export const useStore = create(
 
             // Go back to previous view (called by popstate handler)
             goBack: async () => {
-                const { viewHistory, currentView, isEditing, saveNote, workspacePath } = get();
-
-                // Auto-save if in edit mode
-                if (isEditing && currentView === View.NOTE_EDIT) {
-                    await saveNote();
-                }
+                const state = get();
+                const { viewHistory, currentView } = state;
 
                 if (viewHistory.length <= 1) {
                     // At root, allow app to close (return false to indicate no navigation)
                     return false;
                 }
 
+                // Call onLeave hook for current view
+                const leaveUpdates = await callOnLeave(currentView, state, {
+                    saveNote: get().saveNote,
+                });
+
                 // Pop current view and go to previous
                 const newHistory = viewHistory.slice(0, -1);
                 const previousEntry = newHistory[newHistory.length - 1];
                 const previousView = previousEntry.view;
 
-                // If going back to a note, restore its content
-                if (previousView === View.NOTE_VIEW && previousEntry.note) {
-                    set({
-                        currentNote: previousEntry.note,
-                        noteContent: previousEntry.content || '',
-                        renderedHtml: previousEntry.html || '',
-                        isEditing: false,
-                        currentView: previousView,
-                        viewHistory: newHistory,
-                    });
-                } else if (currentView === View.NOTE_VIEW || currentView === View.NOTE_EDIT) {
-                    // Leaving notes entirely, clear note state
-                    set({
-                        currentNote: null,
-                        noteContent: '',
-                        renderedHtml: '',
-                        isEditing: false,
-                        currentView: previousView,
-                        viewHistory: newHistory,
-                    });
-                } else {
-                    set({
-                        currentView: previousView,
-                        viewHistory: newHistory,
-                    });
-                }
+                // Call onEnter hook for previous view (with saved context)
+                const enterUpdates = callOnEnter(previousView, previousEntry, state);
+
+                // Apply all updates
+                set({
+                    ...leaveUpdates,
+                    ...enterUpdates,
+                    currentView: previousView,
+                    viewHistory: newHistory,
+                });
 
                 return true;
             },
@@ -153,7 +129,8 @@ export const useStore = create(
 
             // Open a note
             openNote: async (filePath) => {
-                const { workspacePath, currentNote, noteContent, renderedHtml, currentView, viewHistory } = get();
+                const state = get();
+                const { workspacePath, currentView, viewHistory } = state;
                 if (!workspacePath) return;
 
                 try {
@@ -165,17 +142,16 @@ export const useStore = create(
                     // Build new history entry for the new note
                     let newHistory;
 
-                    // If currently viewing a note, update the last history entry with current note context
-                    // so we can restore it when going back
-                    if (currentView === View.NOTE_VIEW && currentNote) {
-                        // Update the current history entry with note context before adding new one
+                    // Use saveContext hook to get current context to save
+                    const savedContext = callSaveContext(currentView, state);
+
+                    if (savedContext) {
+                        // Update the current history entry with saved context before adding new one
                         const updatedHistory = viewHistory.slice(0, -1);
                         const currentEntry = viewHistory[viewHistory.length - 1];
                         updatedHistory.push({
                             ...currentEntry,
-                            note: currentNote,
-                            content: noteContent,
-                            html: renderedHtml,
+                            ...savedContext,
                         });
                         newHistory = [...updatedHistory, { view: View.NOTE_VIEW }];
                     } else {
