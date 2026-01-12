@@ -15,7 +15,28 @@ function App() {
     workspacePath,
     loadFiles,
     setView,
+    goBack,
+    initializeHistory,
   } = useStore();
+
+  // Initialize browser history state and set up back button handler
+  useEffect(() => {
+    initializeHistory();
+
+    const handlePopState = async (event) => {
+      // Prevent default behavior and handle navigation ourselves
+      const navigated = await goBack();
+
+      if (!navigated) {
+        // At root view - push a state back so next back press can be caught
+        // This allows the app to close on the next back press
+        history.pushState({ view: View.FILE_LIST, index: 0 }, '', '');
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [goBack, initializeHistory]);
 
   // Load files when workspace is set
   useEffect(() => {

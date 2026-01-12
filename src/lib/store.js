@@ -5,23 +5,14 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
+import { callSaveContext, callOnLeave, callOnEnter } from './viewHooks';
+import { View, SortBy } from './constants';
 
-// Views
-export const View = {
-    FILE_LIST: 'file_list',
-    NOTE_VIEW: 'note_view',
-    NOTE_EDIT: 'note_edit',
-    TASKS: 'tasks',
-    GIT_CONFIG: 'git_config',
-};
+// Re-export for backwards compatibility
+export { View, SortBy };
 
-// Sort options
-export const SortBy = {
-    LAST_MODIFIED: 'lastModified',
-    LAST_CREATED: 'lastCreated',
-    MOST_LINKED: 'mostLinked',
-    ALPHABETICAL: 'alphabetical',
-};
+// Import hooks to register them (must be after View is available)
+import './noteHooks';
 
 export const useStore = create(
     persist(
@@ -31,6 +22,9 @@ export const useStore = create(
 
             // === View State ===
             currentView: View.FILE_LIST,
+            // Navigation history stack - stores objects with view and context
+            // e.g., { view: 'note_view', note: 'file.pn', content: '...', html: '...' }
+            viewHistory: [{ view: View.FILE_LIST }],
 
             // === Files ===
             files: [],
@@ -56,7 +50,62 @@ export const useStore = create(
 
             setWorkspacePath: (path) => set({ workspacePath: path }),
 
+            // Basic view setter (for internal use, e.g., popstate handler)
             setView: (view) => set({ currentView: view }),
+
+            // Navigate to a new view with history tracking
+            navigateTo: (view, pushToHistory = true) => {
+                const { viewHistory, currentView } = get();
+                if (view === currentView) return;
+
+                const entry = { view };
+                const newHistory = [...viewHistory, entry];
+                set({ currentView: view, viewHistory: newHistory });
+
+                if (pushToHistory) {
+                    history.pushState({ view, index: newHistory.length - 1 }, '', '');
+                }
+            },
+
+            // Go back to previous view (called by popstate handler)
+            goBack: async () => {
+                const state = get();
+                const { viewHistory, currentView } = state;
+
+                if (viewHistory.length <= 1) {
+                    // At root, allow app to close (return false to indicate no navigation)
+                    return false;
+                }
+
+                // Call onLeave hook for current view
+                const leaveUpdates = await callOnLeave(currentView, state, {
+                    saveNote: get().saveNote,
+                });
+
+                // Pop current view and go to previous
+                const newHistory = viewHistory.slice(0, -1);
+                const previousEntry = newHistory[newHistory.length - 1];
+                const previousView = previousEntry.view;
+
+                // Call onEnter hook for previous view (with saved context)
+                const enterUpdates = callOnEnter(previousView, previousEntry, state);
+
+                // Apply all updates
+                set({
+                    ...leaveUpdates,
+                    ...enterUpdates,
+                    currentView: previousView,
+                    viewHistory: newHistory,
+                });
+
+                return true;
+            },
+
+            // Initialize history state (called on app mount)
+            initializeHistory: () => {
+                history.replaceState({ view: View.FILE_LIST, index: 0 }, '', '');
+                set({ viewHistory: [{ view: View.FILE_LIST }] });
+            },
 
             setSortBy: async (sortBy) => {
                 set({ sortBy });
@@ -80,7 +129,8 @@ export const useStore = create(
 
             // Open a note
             openNote: async (filePath) => {
-                const { workspacePath } = get();
+                const state = get();
+                const { workspacePath, currentView, viewHistory } = state;
                 if (!workspacePath) return;
 
                 try {
@@ -88,13 +138,35 @@ export const useStore = create(
                         root: workspacePath,
                         filePath
                     });
+
+                    // Build new history entry for the new note
+                    let newHistory;
+
+                    // Use saveContext hook to get current context to save
+                    const savedContext = callSaveContext(currentView, state);
+
+                    if (savedContext) {
+                        // Update the current history entry with saved context before adding new one
+                        const updatedHistory = viewHistory.slice(0, -1);
+                        const currentEntry = viewHistory[viewHistory.length - 1];
+                        updatedHistory.push({
+                            ...currentEntry,
+                            ...savedContext,
+                        });
+                        newHistory = [...updatedHistory, { view: View.NOTE_VIEW }];
+                    } else {
+                        newHistory = [...viewHistory, { view: View.NOTE_VIEW }];
+                    }
+
                     set({
                         currentNote: filePath,
                         noteContent: result.rawContent,
                         renderedHtml: result.html,
                         currentView: View.NOTE_VIEW,
+                        viewHistory: newHistory,
                         isEditing: false,
                     });
+                    history.pushState({ view: View.NOTE_VIEW, index: newHistory.length - 1 }, '', '');
                 } catch (error) {
                     console.error('Failed to open note:', error);
                 }
@@ -102,11 +174,15 @@ export const useStore = create(
 
             // Toggle edit mode
             toggleEdit: () => {
-                const { isEditing } = get();
+                const { isEditing, viewHistory } = get();
+                const newView = isEditing ? View.NOTE_VIEW : View.NOTE_EDIT;
+                const newHistory = [...viewHistory, { view: newView }];
                 set({
                     isEditing: !isEditing,
-                    currentView: isEditing ? View.NOTE_VIEW : View.NOTE_EDIT,
+                    currentView: newView,
+                    viewHistory: newHistory,
                 });
+                history.pushState({ view: newView, index: newHistory.length - 1 }, '', '');
             },
 
             // Update note content (while editing)
@@ -132,13 +208,17 @@ export const useStore = create(
             },
 
             // Close note and go back to file list
-            closeNote: () => set({
-                currentNote: null,
-                noteContent: '',
-                renderedHtml: '',
-                isEditing: false,
-                currentView: View.FILE_LIST,
-            }),
+            closeNote: () => {
+                set({
+                    currentNote: null,
+                    noteContent: '',
+                    renderedHtml: '',
+                    isEditing: false,
+                    currentView: View.FILE_LIST,
+                    viewHistory: [{ view: View.FILE_LIST }], // Reset history when explicitly closing
+                });
+                history.replaceState({ view: View.FILE_LIST, index: 0 }, '', '');
+            },
 
             // Load tasks
             loadTasks: async () => {

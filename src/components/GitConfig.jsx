@@ -17,7 +17,8 @@ export function GitConfig() {
         setGitCredentials,
         gitStatus,
         loadGitStatus,
-        setView,
+        goBack,
+        navigateTo,
         loadFiles,
     } = useStore();
 
@@ -117,7 +118,7 @@ export function GitConfig() {
             await loadFiles();
             await loadGitStatus();
             setStatusMessage('Clone successful!');
-            setView(View.FILE_LIST);
+            navigateTo(View.FILE_LIST);
         } catch (err) {
             console.error('Clone failed:', err);
             setStatusMessage('Clone failed: ' + err);
@@ -135,7 +136,7 @@ export function GitConfig() {
     return (
         <div className="git-config">
             <header className="config-header">
-                <button className="back-btn" onClick={() => setView(View.FILE_LIST)}>
+                <button className="back-btn" onClick={goBack}>
                     ← Back
                 </button>
                 <h1>Settings</h1>
