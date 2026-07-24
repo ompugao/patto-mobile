@@ -20,13 +20,20 @@ export function NoteView() {
     const [showSearch, setShowSearch] = useState(false);
     const inputRef = useRef(null);
 
-    // Store only the query and index, not DOM elements
-    const searchRef = useRef({ query: '', idx: 0, total: 0 });
+    // Search state: store query, current index, total matches, cached matching elements, and active element reference
+    const searchRef = useRef({ query: '', idx: 0, total: 0, matches: [], activeEl: null });
+    const blobUrlsRef = useRef([]);
     const [displayInfo, setDisplayInfo] = useState('');
 
-    // Convert local image paths to base64 data URLs
+    // Convert local image paths to blob Object URLs (lightweight DOM footprint, fast rendering)
     useEffect(() => {
         if (!contentRef.current) return;
+
+        let isMounted = true;
+
+        // Clean up previously created Object URLs
+        blobUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+        blobUrlsRef.current = [];
 
         const loadImages = async () => {
             const images = contentRef.current.querySelectorAll('img');
@@ -35,8 +42,12 @@ export function NoteView() {
                 if (src && src.startsWith('https://asset.localhost/')) {
                     const filePath = src.replace('https://asset.localhost/', '');
                     try {
-                        const dataUrl = await invoke('get_image_base64', { path: filePath });
-                        img.src = dataUrl;
+                        const [bytes, mime] = await invoke('get_image_bytes', { path: filePath });
+                        if (!isMounted) return;
+                        const blob = new Blob([new Uint8Array(bytes)], { type: mime });
+                        const objectUrl = URL.createObjectURL(blob);
+                        blobUrlsRef.current.push(objectUrl);
+                        img.src = objectUrl;
                     } catch (e) {
                         img.alt = 'Image not found';
                     }
@@ -45,6 +56,12 @@ export function NoteView() {
         };
 
         loadImages();
+
+        return () => {
+            isMounted = false;
+            blobUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
+            blobUrlsRef.current = [];
+        };
     }, [renderedHtml]);
 
     // Handle link clicks
@@ -81,11 +98,18 @@ export function NoteView() {
         }
     }, [showSearch]);
 
-    // Get all matching elements fresh each time
-    const getMatchingElements = () => {
-        if (!contentRef.current || !searchRef.current.query) return [];
+    // Clear active search highlight directly
+    const clearHighlights = () => {
+        if (searchRef.current.activeEl) {
+            searchRef.current.activeEl.classList.remove('search-active');
+            searchRef.current.activeEl = null;
+        }
+    };
 
-        const query = searchRef.current.query;
+    // Find all matching elements once
+    const computeMatches = (query) => {
+        if (!contentRef.current || !query) return [];
+
         const lines = contentRef.current.querySelectorAll('.patto-line');
         const found = [];
 
@@ -98,80 +122,82 @@ export function NoteView() {
         return found;
     };
 
-    // Navigate to index
+    // Navigate to index using cached matches in O(1) time
     const navigateToIndex = (idx) => {
-        const elements = getMatchingElements();
-        if (elements.length === 0) return;
+        const matches = searchRef.current.matches;
+        if (!matches || matches.length === 0) return;
 
-        // Wrap index
-        idx = ((idx % elements.length) + elements.length) % elements.length;
+        // Wrap index around total matches
+        idx = ((idx % matches.length) + matches.length) % matches.length;
         searchRef.current.idx = idx;
-        searchRef.current.total = elements.length;
 
-        // Clear previous highlight
-        contentRef.current?.querySelectorAll('.search-active').forEach(e => {
-            e.classList.remove('search-active');
-        });
+        // Remove active class from previous active element
+        clearHighlights();
 
-        // Highlight and scroll to current
-        const el = elements[idx];
+        // Highlight current match
+        const el = matches[idx];
         el.classList.add('search-active');
+        searchRef.current.activeEl = el;
 
-        // Use native scrollIntoView
         try {
             el.scrollIntoView({ block: 'center', inline: 'nearest' });
         } catch (e) {
-            // Fallback for older browsers
             el.scrollIntoView(true);
         }
 
-        setDisplayInfo(`${idx + 1}/${elements.length}`);
+        setDisplayInfo(`${idx + 1}/${matches.length}`);
     };
 
-    // Find - starts new search
+    // Find - starts new search and caches matches
     const doFind = () => {
         const query = inputRef.current?.value?.trim().toLowerCase();
         if (!query || !contentRef.current) {
-            searchRef.current = { query: '', idx: 0, total: 0 };
+            clearHighlights();
+            searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
             setDisplayInfo('');
-            contentRef.current?.querySelectorAll('.search-active').forEach(e => {
-                e.classList.remove('search-active');
-            });
             return;
         }
 
+        clearHighlights();
+        const matches = computeMatches(query);
         searchRef.current.query = query;
-        searchRef.current.idx = -1; // Will become 0 on navigateToIndex
+        searchRef.current.matches = matches;
+        searchRef.current.total = matches.length;
 
-        const elements = getMatchingElements();
-        if (elements.length > 0) {
+        if (matches.length > 0) {
             navigateToIndex(0);
         } else {
+            searchRef.current.idx = -1;
             setDisplayInfo('0/0');
         }
     };
 
     // Go to next match
     const goNext = () => {
-        if (!searchRef.current.query) return;
+        if (!searchRef.current.query || searchRef.current.matches.length === 0) return;
         navigateToIndex(searchRef.current.idx + 1);
     };
 
     // Go to previous match
     const goPrev = () => {
-        if (!searchRef.current.query) return;
+        if (!searchRef.current.query || searchRef.current.matches.length === 0) return;
         navigateToIndex(searchRef.current.idx - 1);
     };
 
     const handleKeyDown = (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
-            if (!searchRef.current.query || searchRef.current.total === 0) {
+            const currentQuery = inputRef.current?.value?.trim().toLowerCase();
+            if (currentQuery !== searchRef.current.query) {
                 doFind();
-            } else if (e.shiftKey) {
-                goPrev();
+            } else if (searchRef.current.matches.length > 0) {
+                if (e.shiftKey) {
+                    goPrev();
+                } else {
+                    goNext();
+                }
             } else {
-                goNext();
+                doFind();
             }
         } else if (e.key === 'Escape') {
             closeSearch();
@@ -180,11 +206,9 @@ export function NoteView() {
 
     const closeSearch = () => {
         setShowSearch(false);
-        searchRef.current = { query: '', idx: 0, total: 0 };
+        clearHighlights();
+        searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
         setDisplayInfo('');
-        contentRef.current?.querySelectorAll('.search-active').forEach(e => {
-            e.classList.remove('search-active');
-        });
     };
 
     const noteName = currentNote?.replace(/\.pn$/, '') || 'Note';

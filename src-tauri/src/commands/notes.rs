@@ -179,3 +179,51 @@ pub fn get_image_base64(path: String) -> Result<String, String> {
     let base64 = STANDARD.encode(&data);
     Ok(format!("data:{};base64,{}", mime, base64))
 }
+
+/// Get image raw bytes and mime type
+#[tauri::command]
+pub fn get_image_bytes(path: String) -> Result<(Vec<u8>, String), String> {
+    let path = std::path::Path::new(&path);
+    if !path.exists() {
+        return Err(format!("Image not found: {:?}", path));
+    }
+
+    let data = fs::read(path).map_err(|e| format!("Failed to read image: {}", e))?;
+
+    let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+
+    Ok((data, mime.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_get_image_bytes() {
+        let temp_dir = std::env::temp_dir();
+        let test_file_path = temp_dir.join("test_image.png");
+        let dummy_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+        let mut file = fs::File::create(&test_file_path).unwrap();
+        file.write_all(&dummy_bytes).unwrap();
+
+        let result = get_image_bytes(test_file_path.to_str().unwrap().to_string());
+        assert!(result.is_ok());
+        let (bytes, mime) = result.unwrap();
+        assert_eq!(bytes, dummy_bytes);
+        assert_eq!(mime, "image/png");
+
+        let _ = fs::remove_file(test_file_path);
+    }
+}
+
+

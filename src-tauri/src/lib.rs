@@ -7,7 +7,8 @@ mod renderer;
 use commands::files::{create_file, delete_file, get_file_info, list_files, rename_file};
 use commands::git::{configure_remote, git_clone, git_init, git_pull, git_status, git_sync};
 use commands::notes::{
-    extract_links, get_image_base64, read_note, render_content, render_note, write_note,
+    extract_links, get_image_base64, get_image_bytes, read_note, render_content, render_note,
+    write_note,
 };
 use commands::tasks::{get_all_tasks, get_file_tasks, get_task_summary};
 
@@ -38,6 +39,7 @@ pub fn run() {
             render_content,
             extract_links,
             get_image_base64,
+            get_image_bytes,
             // Task commands
             get_all_tasks,
             get_file_tasks,
