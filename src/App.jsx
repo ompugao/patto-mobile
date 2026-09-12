@@ -63,9 +63,17 @@ function App() {
       case View.FILE_LIST:
         return <FileList />;
       case View.NOTE_VIEW:
-        return <NoteView />;
       case View.NOTE_EDIT:
-        return <NoteEditor />;
+        // Both stay mounted while a note is open: unmounting detaches the
+        // (possibly huge) note DOM / textarea and re-attaching costs a full
+        // relayout (~1 s for a 12k-line note). NoteEditor renders nothing
+        // until the first Edit and then hides instead of unmounting.
+        return (
+          <>
+            <NoteView />
+            <NoteEditor />
+          </>
+        );
       case View.TASKS:
         return <TaskPanel />;
       case View.GIT_CONFIG:

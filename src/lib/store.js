@@ -193,8 +193,12 @@ export const useStore = create(
                 if (get().lightbox) history.back();
             },
 
-            // Toggle edit mode
-            toggleEdit: () => {
+            // Toggle edit mode. Leaving the editor saves first so Preview shows the
+            // latest text (the editor's debounced auto-save may not have fired yet).
+            toggleEdit: async () => {
+                if (get().isEditing) {
+                    await get().saveNote();
+                }
                 const state = get();
                 const { isEditing, viewHistory, currentView } = state;
                 const newView = isEditing ? View.NOTE_VIEW : View.NOTE_EDIT;
@@ -217,10 +221,12 @@ export const useStore = create(
             // Update note content (while editing)
             setNoteContent: (content) => set({ noteContent: content }),
 
-            // Save note
+            // Save note (no-op when the text is unchanged: avoids rewriting the file,
+            // re-rendering and dirtying git on every editor visit)
             saveNote: async () => {
                 const { workspacePath, currentNote, noteContent } = get();
                 if (!workspacePath || !currentNote) return;
+                if (noteCache.getNote(currentNote)?.content === noteContent) return;
 
                 try {
                     await invoke('write_note', {
