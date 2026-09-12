@@ -10,7 +10,7 @@ const viewHooks = {};
  * @param {Object} hooks - Hook functions
  * @param {Function} [hooks.saveContext] - (state) => context to save in history
  * @param {Function} [hooks.onLeave] - (state, actions) => state updates or Promise
- * @param {Function} [hooks.onEnter] - (context, state) => state updates
+ * @param {Function} [hooks.onEnter] - (context, state) => state updates or Promise
  */
 export function registerViewHooks(view, hooks) {
     viewHooks[view] = { ...viewHooks[view], ...hooks };
@@ -60,12 +60,13 @@ export async function callOnLeave(view, state, actions) {
  * @param {string} view - View being entered
  * @param {Object} context - Saved context from history (if any)
  * @param {Object} state - Current state
- * @returns {Object} State updates to apply
+ * @returns {Promise<Object>} State updates to apply
  */
-export function callOnEnter(view, context, state) {
+export async function callOnEnter(view, context, state) {
     const hooks = getViewHooks(view);
     if (hooks.onEnter) {
-        return hooks.onEnter(context, state);
+        const result = hooks.onEnter(context, state);
+        return result instanceof Promise ? await result : result;
     }
     return {};
 }

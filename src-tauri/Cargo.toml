@@ -46,3 +46,17 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 imagesize = "0.13"
 percent-encoding = "2"
 sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+# Lower the priority of image-decode threads so UI/IPC threads keep the CPU
+libc = "0.2"
+
+# Debug builds: optimize dependencies (image decoding, parser) so `tauri dev` /
+# `tauri android build --debug` are representative; our own crate stays unoptimized.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Keep debug APKs installable on nearly-full phones (unstripped .so is ~330 MB)
+[profile.dev]
+strip = "debuginfo"
+debug = false

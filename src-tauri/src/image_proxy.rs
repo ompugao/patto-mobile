@@ -46,13 +46,23 @@ pub enum ProxyError {
     Forbidden,
     NotFound,
     Internal(String),
+    /// Internal: the fast path could not answer without decoding.
+    NeedsDecode,
 }
 
-/// Cheap, header-only facts about an image file used by the renderer.
-pub struct Probe {
-    /// Changes whenever the file is modified; embedded in the URL for cache busting.
-    pub version: u64,
+/// What the renderer needs to know about a local image (all header/stat-level checks).
+pub struct ImagePlan {
+    /// Downscaled URL (`pimg://…`) for the inline `<img>`.
+    pub src: String,
+    /// URL of the untouched original (`&full=1`) for the lightbox.
+    pub full_src: String,
     pub dimensions: Option<(u32, u32)>,
+    /// True when a request for `src` will be answered without decoding (small
+    /// image, SVG/GIF, missing file, or already in the disk cache). Large
+    /// uncached images are prepared out-of-band via `prepare_images` because a
+    /// slow custom-protocol response blocks the WebView's request thread on
+    /// Android (which also carries Tauri IPC).
+    pub ready: bool,
 }
 
 impl ImageProxy {
@@ -129,7 +139,27 @@ impl ImageProxy {
         }
     }
 
+    /// Existing cache file for this image, if any (uses the non-canonical path;
+    /// `produce` canonicalizes, so only call with the path the renderer used).
+    fn cached_path(&self, abs_path: &Path, meta: &fs::Metadata) -> Option<PathBuf> {
+        let canon = abs_path.canonicalize().ok()?;
+        let key = cache_key(&canon, meta);
+        ["jpg", "png"]
+            .iter()
+            .map(|ext| self.0.cache_dir.join(format!("{key}.{ext}")))
+            .find(|p| p.exists())
+    }
+
+    /// Make sure a later request for `requested` is a fast cache hit.
+    pub async fn prepare(&self, requested: PathBuf) -> Result<(), ProxyError> {
+        self.run(requested, false, false).await.map(|_| ())
+    }
+
     async fn serve(&self, requested: PathBuf, full: bool) -> Result<Served, ProxyError> {
+        self.run(requested, full, true).await
+    }
+
+    async fn run(&self, requested: PathBuf, full: bool, read: bool) -> Result<Served, ProxyError> {
         let root = self
             .0
             .root
@@ -137,6 +167,22 @@ impl ImageProxy {
             .unwrap()
             .clone()
             .ok_or(ProxyError::Forbidden)?;
+
+        // Fast path: raw files and cache hits need neither the decode permit nor the
+        // per-path lock. This must stay quick — on Android the WebView's request
+        // thread (shared with Tauri IPC) is blocked until we respond.
+        {
+            let (root, cache_dir, path) =
+                (root.clone(), self.0.cache_dir.clone(), requested.clone());
+            let fast = tauri::async_runtime::spawn_blocking(move || {
+                produce_fast(&root, &cache_dir, &path, full, read)
+            })
+            .await
+            .map_err(|e| ProxyError::Internal(e.to_string()))?;
+            if let Some(result) = fast {
+                return result;
+            }
+        }
 
         let key_lock = {
             let mut inflight = self.0.inflight.lock().unwrap();
@@ -152,9 +198,12 @@ impl ImageProxy {
                 .map_err(|e| ProxyError::Internal(e.to_string()))?;
             let cache_dir = self.0.cache_dir.clone();
             let path = requested.clone();
-            tauri::async_runtime::spawn_blocking(move || produce(&root, &cache_dir, &path, full))
-                .await
-                .map_err(|e| ProxyError::Internal(e.to_string()))?
+            tauri::async_runtime::spawn_blocking(move || {
+                lower_thread_priority();
+                produce(&root, &cache_dir, &path, full, read)
+            })
+            .await
+            .map_err(|e| ProxyError::Internal(e.to_string()))?
         };
         {
             let mut inflight = self.0.inflight.lock().unwrap();
@@ -189,16 +238,29 @@ fn wants_full(query: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-/// Header-only probe; `None` if the file does not exist.
-pub fn probe(abs_path: &Path) -> Option<Probe> {
-    let meta = fs::metadata(abs_path).ok()?;
+/// Plan how to embed a local image. `proxy` is `None` only outside the app (tests).
+pub fn plan_image(proxy: Option<&ImageProxy>, abs_path: &Path) -> ImagePlan {
+    let meta = fs::metadata(abs_path).ok();
+    let version = meta.as_ref().map(file_version).unwrap_or(0);
     let dimensions = imagesize::size(abs_path)
         .ok()
         .map(|s| (s.width as u32, s.height as u32));
-    Some(Probe {
-        version: file_version(&meta),
+    let ready = match (&meta, proxy) {
+        (None, _) | (_, None) => true,
+        (Some(meta), Some(proxy)) => {
+            let ext = extension_of(abs_path);
+            let small = dimensions
+                .map(|(w, h)| w.max(h) <= MAX_EDGE)
+                .unwrap_or(true);
+            ext == "svg" || ext == "gif" || small || proxy.cached_path(abs_path, meta).is_some()
+        }
+    };
+    ImagePlan {
+        src: image_url(abs_path, version, false),
+        full_src: image_url(abs_path, version, true),
         dimensions,
-    })
+        ready,
+    }
 }
 
 /// URI scheme handler registered in lib.rs.
@@ -226,6 +288,33 @@ pub fn handle<R: Runtime>(
     });
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageReady {
+    path: String,
+    ok: bool,
+}
+
+/// Decode/cache the given images in the background and emit `image-ready`
+/// for each one. Returns immediately so no WebView request thread is held.
+#[tauri::command]
+pub async fn prepare_images(
+    app: tauri::AppHandle,
+    proxy: tauri::State<'_, ImageProxy>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    for path in paths {
+        let proxy = proxy.inner().clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let ok = proxy.prepare(PathBuf::from(&path)).await.is_ok();
+            let _ = app.emit("image-ready", ImageReady { path, ok });
+        });
+    }
+    Ok(())
+}
+
 fn ok_response(served: Served) -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::OK)
@@ -242,6 +331,10 @@ fn error_response(err: ProxyError) -> Response<Vec<u8>> {
         ProxyError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
         ProxyError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
         ProxyError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+        ProxyError::NeedsDecode => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "decode required".to_string(),
+        ),
     };
     Response::builder()
         .status(status)
@@ -250,30 +343,60 @@ fn error_response(err: ProxyError) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+/// Everything `produce` can answer without decoding: validation errors, raw files
+/// and cache hits. `None` means a decode is required.
+fn produce_fast(
+    root: &Path,
+    cache_dir: &Path,
+    requested: &Path,
+    full: bool,
+    read: bool,
+) -> Option<Result<Served, ProxyError>> {
+    match produce_inner(root, cache_dir, requested, full, read, false) {
+        Err(ProxyError::NeedsDecode) => None,
+        other => Some(other),
+    }
+}
+
 /// Synchronous worker: validate the path, then serve raw bytes or a cached downscale.
 /// `full` skips downscaling (used by the lightbox to show the original).
+/// `read = false` only makes sure the cache is populated and returns empty bytes.
 fn produce(
     root: &Path,
     cache_dir: &Path,
     requested: &Path,
     full: bool,
+    read: bool,
+) -> Result<Served, ProxyError> {
+    produce_inner(root, cache_dir, requested, full, read, true)
+}
+
+fn produce_inner(
+    root: &Path,
+    cache_dir: &Path,
+    requested: &Path,
+    full: bool,
+    read: bool,
+    may_decode: bool,
 ) -> Result<Served, ProxyError> {
     // canonicalize resolves `..` and symlinks, so `starts_with` is a real containment check.
     let canon = requested.canonicalize().map_err(|_| ProxyError::NotFound)?;
     if !canon.starts_with(root) {
         return Err(ProxyError::Forbidden);
     }
-    let ext = canon
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
+    let ext = extension_of(&canon);
     if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         return Err(ProxyError::Forbidden);
     }
     let mime = mime_for(&ext);
     let meta = fs::metadata(&canon).map_err(|_| ProxyError::NotFound)?;
     let raw = || {
+        if !read {
+            return Ok(Served {
+                bytes: Vec::new(),
+                mime,
+            });
+        }
         fs::read(&canon)
             .map(|bytes| Served { bytes, mime })
             .map_err(|_| ProxyError::NotFound)
@@ -292,7 +415,14 @@ fn produce(
 
     let key = cache_key(&canon, &meta);
     for (suffix, cached_mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
-        if let Ok(bytes) = fs::read(cache_dir.join(format!("{key}.{suffix}"))) {
+        let cached = cache_dir.join(format!("{key}.{suffix}"));
+        if !read && cached.exists() {
+            return Ok(Served {
+                bytes: Vec::new(),
+                mime: cached_mime,
+            });
+        }
+        if let Ok(bytes) = fs::read(&cached) {
             return Ok(Served {
                 bytes,
                 mime: cached_mime,
@@ -300,6 +430,9 @@ fn produce(
         }
     }
 
+    if !may_decode {
+        return Err(ProxyError::NeedsDecode);
+    }
     match downscale(&canon) {
         Ok((bytes, out_mime, suffix)) => {
             atomic_write(&cache_dir.join(format!("{key}.{suffix}")), &bytes);
@@ -359,6 +492,23 @@ fn downscale(path: &Path) -> image::ImageResult<(Vec<u8>, &'static str, &'static
 
 fn has_transparency(img: &image::DynamicImage) -> bool {
     img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p[3] != 255)
+}
+
+/// Decoding a 20 MP PNG saturates a core for hundreds of ms; on a phone that
+/// competes with the WebView and Tauri IPC. Nice the (pooled) worker thread.
+fn lower_thread_priority() {
+    #[cfg(unix)]
+    unsafe {
+        // PRIO_PROCESS with id 0 targets the calling thread on Linux/Android.
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+}
+
+fn extension_of(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 fn mime_for(ext: &str) -> &'static str {
@@ -469,7 +619,7 @@ mod tests {
         let src = root.join("big.png");
         write_png(&src, 3000, 2000);
 
-        let served = produce(&root, &cache, &src, false).unwrap();
+        let served = produce(&root, &cache, &src, false, true).unwrap();
         assert_eq!(served.mime, "image/jpeg");
         assert_eq!(&served.bytes[..2], &[0xFF, 0xD8]);
         let decoded = image::load_from_memory(&served.bytes).unwrap();
@@ -479,13 +629,59 @@ mod tests {
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path().extension().unwrap(), "jpg");
 
-        let again = produce(&root, &cache, &src, false).unwrap();
+        let again = produce(&root, &cache, &src, false, true).unwrap();
         assert_eq!(again.bytes, served.bytes);
 
         // full=1 returns the untouched original
-        let original = produce(&root, &cache, &src, true).unwrap();
+        let original = produce(&root, &cache, &src, true, true).unwrap();
         assert_eq!(original.mime, "image/png");
         assert_eq!(original.bytes, fs::read(&src).unwrap());
+
+        // read=false on a cache hit returns no bytes but succeeds
+        let ensured = produce(&root, &cache, &src, false, false).unwrap();
+        assert!(ensured.bytes.is_empty());
+        // fast path answers cache hits and originals, but not cold decodes
+        assert!(produce_fast(&root, &cache, &src, false, true).is_some());
+        assert!(produce_fast(&root, &cache, &src, true, true).is_some());
+        fs::remove_dir_all(&cache).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        assert!(produce_fast(&root, &cache, &src, false, true).is_none());
+        assert_eq!(
+            produce_fast(&root, &cache, &root.join("nope.png"), false, true)
+                .unwrap()
+                .unwrap_err(),
+            ProxyError::NotFound
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_reports_readiness_and_prepare_populates_cache() {
+        let root = temp_root("plan");
+        let cache = root.join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let big = root.join("big.png");
+        write_png(&big, 2000, 1500);
+        let small = root.join("small.png");
+        write_png(&small, 300, 200);
+        let proxy = ImageProxy::new(cache.clone());
+        proxy.set_root(&root);
+
+        let plan = plan_image(Some(&proxy), &big);
+        assert!(!plan.ready, "large uncached image must not be ready");
+        assert_eq!(plan.dimensions, Some((2000, 1500)));
+        assert!(plan.full_src.ends_with("&full=1"));
+        assert!(plan_image(Some(&proxy), &small).ready);
+        assert!(plan_image(Some(&proxy), &root.join("missing.png")).ready);
+        assert!(plan_image(None, &big).ready, "no proxy: always inline");
+
+        tauri::async_runtime::block_on(proxy.prepare(big.clone())).unwrap();
+        assert!(plan_image(Some(&proxy), &big).ready, "cached after prepare");
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+        assert_eq!(
+            tauri::async_runtime::block_on(proxy.prepare(root.join("nope.png"))).unwrap_err(),
+            ProxyError::NotFound
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -499,10 +695,10 @@ mod tests {
         let svg = root.join("v.svg");
         fs::write(&svg, "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
 
-        let served = produce(&root, &cache, &png, false).unwrap();
+        let served = produce(&root, &cache, &png, false, true).unwrap();
         assert_eq!(served.mime, "image/png");
         assert_eq!(served.bytes, fs::read(&png).unwrap());
-        let served = produce(&root, &cache, &svg, false).unwrap();
+        let served = produce(&root, &cache, &svg, false, true).unwrap();
         assert_eq!(served.mime, "image/svg+xml");
         assert_eq!(served.bytes, fs::read(&svg).unwrap());
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
@@ -520,7 +716,7 @@ mod tests {
         write_png(&secret, 10, 10);
 
         assert_eq!(
-            produce(&root, &cache, &secret, false).unwrap_err(),
+            produce(&root, &cache, &secret, false, true).unwrap_err(),
             ProxyError::Forbidden
         );
         let traversal = root
@@ -530,20 +726,20 @@ mod tests {
             .join(outside.file_name().unwrap())
             .join("secret.png");
         assert_eq!(
-            produce(&root, &cache, &traversal, false).unwrap_err(),
+            produce(&root, &cache, &traversal, false, true).unwrap_err(),
             ProxyError::Forbidden
         );
         assert_eq!(
-            produce(&root, &cache, &root.join("missing.png"), false).unwrap_err(),
+            produce(&root, &cache, &root.join("missing.png"), false, true).unwrap_err(),
             ProxyError::NotFound
         );
         assert_eq!(
-            produce(&root, &cache, &root.join("notes.pn"), false).unwrap_err(),
+            produce(&root, &cache, &root.join("notes.pn"), false, true).unwrap_err(),
             ProxyError::NotFound
         );
         fs::write(root.join("notes.pn"), "x").unwrap();
         assert_eq!(
-            produce(&root, &cache, &root.join("notes.pn"), false).unwrap_err(),
+            produce(&root, &cache, &root.join("notes.pn"), false, true).unwrap_err(),
             ProxyError::Forbidden
         );
         let _ = fs::remove_dir_all(&root);

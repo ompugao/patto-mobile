@@ -7,12 +7,22 @@ import { persist } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
 import { callSaveContext, callOnLeave, callOnEnter } from './viewHooks';
 import { View, SortBy } from './constants';
+import * as noteCache from './noteCache';
 
 // Re-export for backwards compatibility
 export { View, SortBy };
 
 // Import hooks to register them (must be after View is available)
 import './noteHooks';
+
+// Copy of the history with the current (last) entry merged with `context` (if any)
+function withSavedContext(viewHistory, context) {
+    const history = [...viewHistory];
+    if (context && history.length > 0) {
+        history[history.length - 1] = { ...history[history.length - 1], ...context };
+    }
+    return history;
+}
 
 export const useStore = create(
     persist(
@@ -36,6 +46,11 @@ export const useStore = create(
             noteContent: '',
             renderedHtml: '',
             isEditing: false,
+            // Where NoteView should scroll once the note is shown:
+            // { scrollTop, anchor, seq } (seq makes repeated identical targets re-apply)
+            noteTarget: null,
+            // Scroll position of the note when the editor was opened (restored on Preview)
+            editReturnScrollTop: 0,
 
             // === Lightbox (full-size image viewer over the note view) ===
             lightbox: null, // { src, alt } | null
@@ -91,7 +106,7 @@ export const useStore = create(
                 const previousView = previousEntry.view;
 
                 // Call onEnter hook for previous view (with saved context)
-                const enterUpdates = callOnEnter(previousView, previousEntry, state);
+                const enterUpdates = await callOnEnter(previousView, previousEntry, state);
 
                 // Apply all updates
                 set({
@@ -130,41 +145,32 @@ export const useStore = create(
                 }
             },
 
-            // Open a note
-            openNote: async (filePath) => {
+            // Open a note, optionally jumping to an anchor (wikilink `note.pn#anchor`).
+            // Always re-renders from disk so edits/syncs are picked up; the DOM is only
+            // rebuilt when the rendered HTML actually changed.
+            openNote: async (filePath, anchor = null) => {
                 const state = get();
                 const { workspacePath, currentView, viewHistory } = state;
                 if (!workspacePath) return;
+
+                // Save the current view's context (e.g. scroll position) before we leave it
+                const savedContext = callSaveContext(currentView, state);
 
                 try {
                     const result = await invoke('render_note', {
                         root: workspacePath,
                         filePath
                     });
+                    const entry = noteCache.setNote(filePath, { content: result.rawContent, html: result.html });
 
-                    // Build new history entry for the new note
-                    let newHistory;
-
-                    // Use saveContext hook to get current context to save
-                    const savedContext = callSaveContext(currentView, state);
-
-                    if (savedContext) {
-                        // Update the current history entry with saved context before adding new one
-                        const updatedHistory = viewHistory.slice(0, -1);
-                        const currentEntry = viewHistory[viewHistory.length - 1];
-                        updatedHistory.push({
-                            ...currentEntry,
-                            ...savedContext,
-                        });
-                        newHistory = [...updatedHistory, { view: View.NOTE_VIEW }];
-                    } else {
-                        newHistory = [...viewHistory, { view: View.NOTE_VIEW }];
-                    }
+                    const newHistory = withSavedContext(viewHistory, savedContext);
+                    newHistory.push({ view: View.NOTE_VIEW });
 
                     set({
                         currentNote: filePath,
-                        noteContent: result.rawContent,
-                        renderedHtml: result.html,
+                        noteContent: entry.content,
+                        renderedHtml: entry.html,
+                        noteTarget: { scrollTop: 0, anchor, seq: Date.now() },
                         currentView: View.NOTE_VIEW,
                         viewHistory: newHistory,
                         isEditing: false,
@@ -189,13 +195,21 @@ export const useStore = create(
 
             // Toggle edit mode
             toggleEdit: () => {
-                const { isEditing, viewHistory } = get();
+                const state = get();
+                const { isEditing, viewHistory, currentView } = state;
                 const newView = isEditing ? View.NOTE_VIEW : View.NOTE_EDIT;
-                const newHistory = [...viewHistory, { view: newView }];
+                // Remember the scroll position so both Back and Preview from the editor
+                // land where we were
+                const savedContext = callSaveContext(currentView, state);
+                const newHistory = withSavedContext(viewHistory, savedContext);
+                newHistory.push({ view: newView });
                 set({
                     isEditing: !isEditing,
                     currentView: newView,
                     viewHistory: newHistory,
+                    ...(isEditing
+                        ? { noteTarget: { scrollTop: state.editReturnScrollTop ?? 0, anchor: null, seq: Date.now() } }
+                        : { editReturnScrollTop: savedContext?.scrollTop ?? 0 }),
                 });
                 history.pushState({ view: newView, index: newHistory.length - 1 }, '', '');
             },
@@ -214,8 +228,9 @@ export const useStore = create(
                         filePath: currentNote,
                         content: noteContent
                     });
-                    // Re-render after save
+                    // Re-render after save (drops the cached DOM if the HTML changed)
                     const html = await invoke('render_content', { root: workspacePath, content: noteContent });
+                    noteCache.setNote(currentNote, { content: noteContent, html });
                     set({ renderedHtml: html });
                 } catch (error) {
                     console.error('Failed to save note:', error);
@@ -228,6 +243,7 @@ export const useStore = create(
                     currentNote: null,
                     noteContent: '',
                     renderedHtml: '',
+                    noteTarget: null,
                     isEditing: false,
                     currentView: View.FILE_LIST,
                     viewHistory: [{ view: View.FILE_LIST }], // Reset history when explicitly closing
@@ -266,7 +282,8 @@ export const useStore = create(
                         message: 'Sync from patto-mobile',
                         credentials: gitCredentials
                     });
-                    // Reload files after sync
+                    // Files may have changed on disk: drop cached renders, reload list
+                    noteCache.clear();
                     await get().loadFiles();
                 } catch (error) {
                     console.error('Git sync failed:', error);

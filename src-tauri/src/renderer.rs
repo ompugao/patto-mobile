@@ -1,18 +1,23 @@
 // Mobile-optimized HTML renderer for patto notes
 // Generates clean HTML without inline styles for easier CSS styling
 
-use crate::image_proxy;
+use crate::image_proxy::{self, ImageProxy};
 use patto::parser::{AstNode, AstNodeKind, Property, TaskStatus};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub struct MobileHtmlRenderer {
+pub struct MobileHtmlRenderer<'a> {
     workspace_path: Option<String>,
+    /// Decides whether an image can be inlined right away (see `ImagePlan::ready`)
+    image_proxy: Option<&'a ImageProxy>,
 }
 
-impl MobileHtmlRenderer {
-    pub fn new(workspace_path: Option<String>) -> Self {
-        Self { workspace_path }
+impl<'a> MobileHtmlRenderer<'a> {
+    pub fn new(workspace_path: Option<String>, image_proxy: Option<&'a ImageProxy>) -> Self {
+        Self {
+            workspace_path,
+            image_proxy,
+        }
     }
 
     pub fn render(&self, ast: &AstNode) -> io::Result<String> {
@@ -160,27 +165,40 @@ impl MobileHtmlRenderer {
                 // Local images go through the `pimg` proxy (downscaled + cached).
                 // width/height come from the file header so layout is stable
                 // before the image loads (no jumps while scrolling/searching).
+                // Local images: `src` when the proxy can answer instantly, otherwise
+                // `data-pending-src` + `data-prepare` (the frontend asks Rust to
+                // decode it in the background and swaps in `src` on `image-ready`).
                 // `data-full` points at the untouched original for the lightbox.
-                let (resolved_src, full_src, dimensions) = match self.resolve_image_path(src) {
-                    ImageSource::Remote(url) => (url, None, None),
+                let (src, pending, full_src, dimensions) = match self.resolve_image_path(src) {
+                    ImageSource::Remote(url) => (Some(url), None, None, None),
                     ImageSource::Local(abs) => {
-                        let probe = image_proxy::probe(&abs);
-                        let version = probe.as_ref().map(|p| p.version).unwrap_or(0);
-                        (
-                            image_proxy::image_url(&abs, version, false),
-                            Some(image_proxy::image_url(&abs, version, true)),
-                            probe.and_then(|p| p.dimensions),
-                        )
+                        let plan = image_proxy::plan_image(self.image_proxy, &abs);
+                        if plan.ready {
+                            (Some(plan.src), None, Some(plan.full_src), plan.dimensions)
+                        } else {
+                            (
+                                None,
+                                Some((plan.src, abs.to_string_lossy().to_string())),
+                                Some(plan.full_src),
+                                plan.dimensions,
+                            )
+                        }
                     }
-                    ImageSource::Unresolved(raw) => (raw, None, None),
+                    ImageSource::Unresolved(raw) => (Some(raw), None, None, None),
                 };
                 write!(output, "<figure class=\"patto-figure\">")?;
-                write!(
-                    output,
-                    "<img class=\"patto-image\" src=\"{}\" alt=\"{}\"",
-                    html_escape(&resolved_src),
-                    alt_text
-                )?;
+                write!(output, "<img class=\"patto-image\" alt=\"{}\"", alt_text)?;
+                if let Some(src) = src {
+                    write!(output, " src=\"{}\"", html_escape(&src))?;
+                }
+                if let Some((pending_src, path)) = pending {
+                    write!(
+                        output,
+                        " data-pending-src=\"{}\" data-prepare=\"{}\"",
+                        html_escape(&pending_src),
+                        html_escape(&path)
+                    )?;
+                }
                 if let Some(full) = full_src {
                     write!(output, " data-full=\"{}\"", html_escape(&full))?;
                 }
@@ -227,10 +245,13 @@ impl MobileHtmlRenderer {
                 // Check for YouTube, Twitter embeds
                 if link.contains("youtube.com") || link.contains("youtu.be") {
                     if let Some(video_id) = extract_youtube_id(link) {
+                        // Facade: a live player per link (a journal can have dozens)
+                        // costs megabytes of JS and slows every layout; the frontend
+                        // swaps in the iframe when tapped.
+                        let id = html_escape(&video_id);
                         write!(
                             output,
-                            "<div class=\"video-embed\"><iframe src=\"https://www.youtube.com/embed/{}\" frameborder=\"0\" allowfullscreen></iframe></div>",
-                            video_id
+                            "<div class=\"video-facade\" data-youtube-id=\"{id}\" role=\"button\" aria-label=\"Play video\"><img src=\"https://i.ytimg.com/vi/{id}/hqdefault.jpg\" alt=\"\" loading=\"lazy\" decoding=\"async\"/></div>",
                         )?;
                     } else {
                         write!(

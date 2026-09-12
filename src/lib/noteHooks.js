@@ -1,37 +1,48 @@
 // Note view hooks - lifecycle hooks for NOTE_VIEW and NOTE_EDIT
 // Registers saveContext, onLeave, and onEnter hooks for note navigation
 
+import { invoke } from '@tauri-apps/api/core';
 import { registerViewHooks } from './viewHooks';
 import { View } from './constants';
+import * as noteCache from './noteCache';
 
 // NOTE_VIEW hooks
 registerViewHooks(View.NOTE_VIEW, {
-    // Save current note context before navigating away
+    // Remember which note and where it was scrolled to; the rendered DOM itself
+    // stays alive in noteCache, so nothing heavy is copied into history.
     saveContext: (state) => ({
         note: state.currentNote,
-        content: state.noteContent,
-        html: state.renderedHtml,
+        scrollTop: noteCache.currentScrollTop(),
     }),
 
-    // Clean up when leaving note view (only if not going to another note)
-    onLeave: (state, actions) => ({
+    // Clean up when leaving note view (overridden by onEnter when returning to another note)
+    onLeave: () => ({
         currentNote: null,
         noteContent: '',
         renderedHtml: '',
         isEditing: false,
     }),
 
-    // Restore note context when returning to a previous note
-    onEnter: (context, state) => {
-        if (context && context.note) {
-            return {
-                currentNote: context.note,
-                noteContent: context.content || '',
-                renderedHtml: context.html || '',
-                isEditing: false,
-            };
+    // Restore a previous note. Uses the cached render; re-renders only if it was evicted.
+    onEnter: async (context, state) => {
+        if (!context || !context.note) return {};
+
+        let entry = noteCache.getNote(context.note);
+        if (!entry) {
+            const result = await invoke('render_note', {
+                root: state.workspacePath,
+                filePath: context.note,
+            });
+            entry = noteCache.setNote(context.note, { content: result.rawContent, html: result.html });
         }
-        return {};
+
+        return {
+            currentNote: context.note,
+            noteContent: entry.content,
+            renderedHtml: entry.html,
+            isEditing: false,
+            noteTarget: { scrollTop: context.scrollTop ?? 0, anchor: null, seq: Date.now() },
+        };
     },
 });
 
