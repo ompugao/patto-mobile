@@ -1,9 +1,10 @@
 // Mobile-optimized HTML renderer for patto notes
 // Generates clean HTML without inline styles for easier CSS styling
 
+use crate::image_proxy;
 use patto::parser::{AstNode, AstNodeKind, Property, TaskStatus};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct MobileHtmlRenderer {
     workspace_path: Option<String>,
@@ -16,26 +17,37 @@ impl MobileHtmlRenderer {
 
     pub fn render(&self, ast: &AstNode) -> io::Result<String> {
         let mut output = Vec::new();
-        self.render_node(ast, &mut output, 0)?;
+        let mut line_idx = 0;
+        self.render_node(ast, &mut output, 0, &mut line_idx)?;
         Ok(String::from_utf8_lossy(&output).to_string())
     }
 
-    fn render_node(&self, ast: &AstNode, output: &mut dyn Write, depth: usize) -> io::Result<()> {
+    /// `line_idx` numbers every rendered `.patto-line` in document order; the
+    /// frontend uses it (`data-line-idx`) to re-find search matches.
+    fn render_node(
+        &self,
+        ast: &AstNode,
+        output: &mut dyn Write,
+        depth: usize,
+        line_idx: &mut usize,
+    ) -> io::Result<()> {
         match &ast.kind() {
             AstNodeKind::Dummy => {
                 write!(output, "<div class=\"patto-root\">")?;
                 let children = ast.value().children.lock().unwrap();
                 for child in children.iter() {
-                    self.render_node(child, output, depth)?;
+                    self.render_node(child, output, depth, line_idx)?;
                 }
                 write!(output, "</div>")?;
             }
             AstNodeKind::Line { properties } | AstNodeKind::QuoteContent { properties } => {
                 let class = self.get_line_class(properties);
+                let current_idx = *line_idx;
+                *line_idx += 1;
                 write!(
                     output,
-                    "<div class=\"patto-line{}\" data-depth=\"{}\">",
-                    class, depth
+                    "<div class=\"patto-line{}\" data-depth=\"{}\" data-line-idx=\"{}\">",
+                    class, depth, current_idx
                 )?;
 
                 // Task checkbox
@@ -44,6 +56,7 @@ impl MobileHtmlRenderer {
                         let (checked, status_class) = match status {
                             TaskStatus::Done => ("checked", "done"),
                             TaskStatus::Doing => ("", "doing"),
+                            TaskStatus::Paused => ("", "paused"),
                             TaskStatus::Todo => ("", "todo"),
                         };
                         write!(
@@ -58,7 +71,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<span class=\"line-content\">")?;
                 let contents = ast.value().contents.lock().unwrap();
                 for content in contents.iter() {
-                    self.render_node(content, output, depth)?;
+                    self.render_node(content, output, depth, line_idx)?;
                 }
                 write!(output, "</span>")?;
 
@@ -91,7 +104,7 @@ impl MobileHtmlRenderer {
                 if !children.is_empty() {
                     write!(output, "<div class=\"patto-children\">")?;
                     for child in children.iter() {
-                        self.render_node(child, output, depth + 1)?;
+                        self.render_node(child, output, depth + 1, line_idx)?;
                     }
                     write!(output, "</div>")?;
                 }
@@ -100,7 +113,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<blockquote class=\"patto-quote\">")?;
                 let children = ast.value().children.lock().unwrap();
                 for child in children.iter() {
-                    self.render_node(child, output, depth)?;
+                    self.render_node(child, output, depth, line_idx)?;
                 }
                 write!(output, "</blockquote>")?;
             }
@@ -143,13 +156,31 @@ impl MobileHtmlRenderer {
                 }
             }
             AstNodeKind::Image { src, alt } => {
-                let resolved_src = self.resolve_image_path(src);
-                let alt_text = alt.as_deref().unwrap_or("");
+                let alt_text = html_escape(alt.as_deref().unwrap_or(""));
+                // Local images go through the `pimg` proxy (downscaled + cached).
+                // width/height come from the file header so layout is stable
+                // before the image loads (no jumps while scrolling/searching).
+                let (resolved_src, dimensions) = match self.resolve_image_path(src) {
+                    ImageSource::Remote(url) => (url, None),
+                    ImageSource::Local(abs) => match image_proxy::probe(&abs) {
+                        Some(probe) => (
+                            image_proxy::image_url(&abs, probe.version),
+                            probe.dimensions,
+                        ),
+                        None => (image_proxy::image_url(&abs, 0), None),
+                    },
+                    ImageSource::Unresolved(raw) => (raw, None),
+                };
                 write!(
                     output,
-                    "<img class=\"patto-image\" src=\"{}\" alt=\"{}\" loading=\"lazy\"/>",
-                    resolved_src, alt_text
+                    "<img class=\"patto-image\" src=\"{}\" alt=\"{}\"",
+                    html_escape(&resolved_src),
+                    alt_text
                 )?;
+                if let Some((w, h)) = dimensions {
+                    write!(output, " width=\"{}\" height=\"{}\"", w, h)?;
+                }
+                write!(output, " loading=\"lazy\" decoding=\"async\"/>")?;
             }
             AstNodeKind::WikiLink { link, anchor } => {
                 let href = if let Some(anchor) = anchor {
@@ -176,7 +207,7 @@ impl MobileHtmlRenderer {
                     href, display
                 )?;
             }
-            AstNodeKind::Link { link, title } => {
+            AstNodeKind::Link { link, title } | AstNodeKind::Embed { link, title } => {
                 let display = title.as_deref().unwrap_or(link);
                 // Check for YouTube, Twitter embeds
                 if link.contains("youtube.com") || link.contains("youtu.be") {
@@ -228,7 +259,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<span class=\"decoration {}\">", class_str)?;
                 let contents = ast.value().contents.lock().unwrap();
                 for content in contents.iter() {
-                    self.render_node(content, output, depth)?;
+                    self.render_node(content, output, depth, line_idx)?;
                 }
                 write!(output, "</span>")?;
             }
@@ -246,7 +277,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<tbody>")?;
                 let children = ast.value().children.lock().unwrap();
                 for child in children.iter() {
-                    self.render_node(child, output, depth)?;
+                    self.render_node(child, output, depth, line_idx)?;
                 }
                 write!(output, "</tbody></table>")?;
             }
@@ -254,7 +285,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<tr>")?;
                 let contents = ast.value().contents.lock().unwrap();
                 for content in contents.iter() {
-                    self.render_node(content, output, depth)?;
+                    self.render_node(content, output, depth, line_idx)?;
                 }
                 write!(output, "</tr>")?;
             }
@@ -262,7 +293,7 @@ impl MobileHtmlRenderer {
                 write!(output, "<td>")?;
                 let contents = ast.value().contents.lock().unwrap();
                 for content in contents.iter() {
-                    self.render_node(content, output, depth)?;
+                    self.render_node(content, output, depth, line_idx)?;
                 }
                 write!(output, "</td>")?;
             }
@@ -278,6 +309,7 @@ impl MobileHtmlRenderer {
                     classes.push(match status {
                         TaskStatus::Todo => " task todo",
                         TaskStatus::Doing => " task doing",
+                        TaskStatus::Paused => " task paused",
                         TaskStatus::Done => " task done",
                     });
                 }
@@ -289,21 +321,26 @@ impl MobileHtmlRenderer {
         classes.join("")
     }
 
-    fn resolve_image_path(&self, src: &str) -> String {
-        // If it's already an absolute URL, use as-is
-        if src.starts_with("http://") || src.starts_with("https://") {
-            return src.to_string();
+    fn resolve_image_path(&self, src: &str) -> ImageSource {
+        if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
+            return ImageSource::Remote(src.to_string());
         }
-
-        // For local paths, resolve relative to workspace and use Tauri asset protocol
-        if let Some(workspace) = &self.workspace_path {
-            let full_path = Path::new(workspace).join(src);
-            // Use https://asset.localhost for Tauri 2 asset protocol
-            format!("https://asset.localhost/{}", full_path.display())
-        } else {
-            src.to_string()
+        match &self.workspace_path {
+            Some(workspace) => {
+                ImageSource::Local(Path::new(workspace).join(src.strip_prefix("./").unwrap_or(src)))
+            }
+            None => ImageSource::Unresolved(src.to_string()),
         }
     }
+}
+
+enum ImageSource {
+    /// http(s)/data: URL, passed through untouched
+    Remote(String),
+    /// Absolute path inside the workspace, served via the image proxy
+    Local(PathBuf),
+    /// No workspace known: emit the raw src
+    Unresolved(String),
 }
 
 fn html_escape(s: &str) -> String {

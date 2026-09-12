@@ -200,7 +200,7 @@ export const useStore = create(
                         content: noteContent
                     });
                     // Re-render after save
-                    const html = await invoke('render_content', { content: noteContent });
+                    const html = await invoke('render_content', { root: workspacePath, content: noteContent });
                     set({ renderedHtml: html });
                 } catch (error) {
                     console.error('Failed to save note:', error);

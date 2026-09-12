@@ -76,6 +76,9 @@
     position: relative;
     min-height: 1.4em;
     /* Ensures empty lines have height */
+    /* Skip layout/paint for off-screen lines (journal.pn has >12k of them) */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 1.6em;
 }
 
 /* Empty line styling - show as blank space */
@@ -167,6 +170,11 @@
 
 .patto-line.task.todo .line-content {
     color: #ffa94d;
+}
+
+.patto-line.task.paused .line-content {
+    color: #a9a9a9;
+    font-style: italic;
 }
 
 .patto-line.task.doing .line-content {

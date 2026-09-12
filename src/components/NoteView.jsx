@@ -1,10 +1,10 @@
 // NoteView component - displays rendered note content with simple search
-// Re-queries elements on each navigation to avoid stale DOM references
+// Images are served natively by the Rust `pimg` URI scheme (see src-tauri/src/image_proxy.rs),
+// so nothing is done for them here. Search runs against a lazily built text index.
 
 import { useStore, View } from '../lib/store';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { invoke } from '@tauri-apps/api/core';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import './NoteView.css';
 
 export function NoteView() {
@@ -22,46 +22,19 @@ export function NoteView() {
 
     // Search state: store query, current index, total matches, cached matching elements, and active element reference
     const searchRef = useRef({ query: '', idx: 0, total: 0, matches: [], activeEl: null });
-    const blobUrlsRef = useRef([]);
+    // Lowercased text of every .patto-line, built once per rendered HTML on first search
+    const indexRef = useRef({ html: null, lines: [] });
     const [displayInfo, setDisplayInfo] = useState('');
+    // Keep the same object across renders: React re-assigns innerHTML whenever this
+    // prop's identity changes, which would rebuild the whole note DOM on every
+    // search-counter update (and drop the highlighted element).
+    const htmlProp = useMemo(() => ({ __html: renderedHtml }), [renderedHtml]);
 
-    // Convert local image paths to blob Object URLs (lightweight DOM footprint, fast rendering)
+    // Rendered HTML changed (navigation, save): drop stale element refs and highlights
     useEffect(() => {
-        if (!contentRef.current) return;
-
-        let isMounted = true;
-
-        // Clean up previously created Object URLs
-        blobUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
-        blobUrlsRef.current = [];
-
-        const loadImages = async () => {
-            const images = contentRef.current.querySelectorAll('img');
-            for (const img of images) {
-                const src = img.getAttribute('src');
-                if (src && src.startsWith('https://asset.localhost/')) {
-                    const filePath = src.replace('https://asset.localhost/', '');
-                    try {
-                        const [bytes, mime] = await invoke('get_image_bytes', { path: filePath });
-                        if (!isMounted) return;
-                        const blob = new Blob([new Uint8Array(bytes)], { type: mime });
-                        const objectUrl = URL.createObjectURL(blob);
-                        blobUrlsRef.current.push(objectUrl);
-                        img.src = objectUrl;
-                    } catch (e) {
-                        img.alt = 'Image not found';
-                    }
-                }
-            }
-        };
-
-        loadImages();
-
-        return () => {
-            isMounted = false;
-            blobUrlsRef.current.forEach(url => URL.revokeObjectURL(url));
-            blobUrlsRef.current = [];
-        };
+        indexRef.current = { html: null, lines: [] };
+        searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
+        setDisplayInfo('');
     }, [renderedHtml]);
 
     // Handle link clicks
@@ -106,19 +79,27 @@ export function NoteView() {
         }
     };
 
-    // Find all matching elements once
-    const computeMatches = (query) => {
-        if (!contentRef.current || !query) return [];
-
-        const lines = contentRef.current.querySelectorAll('.patto-line');
-        const found = [];
-
-        lines.forEach(line => {
-            if (line.textContent.toLowerCase().includes(query)) {
-                found.push(line);
+    // Build (once per rendered HTML) the text index: one DOM pass, no layout
+    const getIndex = () => {
+        if (!contentRef.current) return [];
+        if (indexRef.current.html !== renderedHtml) {
+            const els = contentRef.current.querySelectorAll('.patto-line');
+            const lines = new Array(els.length);
+            for (let i = 0; i < els.length; i++) {
+                lines[i] = { el: els[i], idx: els[i].getAttribute('data-line-idx'), text: els[i].textContent.toLowerCase() };
             }
-        });
+            indexRef.current = { html: renderedHtml, lines };
+        }
+        return indexRef.current.lines;
+    };
 
+    // Find all matching lines from the in-memory index
+    const computeMatches = (query) => {
+        if (!query) return [];
+        const found = [];
+        for (const line of getIndex()) {
+            if (line.text.includes(query)) found.push(line);
+        }
         return found;
     };
 
@@ -134,15 +115,21 @@ export function NoteView() {
         // Remove active class from previous active element
         clearHighlights();
 
-        // Highlight current match
-        const el = matches[idx];
-        el.classList.add('search-active');
-        searchRef.current.activeEl = el;
-
-        try {
-            el.scrollIntoView({ block: 'center', inline: 'nearest' });
-        } catch (e) {
-            el.scrollIntoView(true);
+        // Highlight current match (re-find by data-line-idx if the element was replaced)
+        const match = matches[idx];
+        let el = match.el;
+        if (!el || !el.isConnected) {
+            el = contentRef.current?.querySelector(`[data-line-idx="${match.idx}"]`);
+            match.el = el;
+        }
+        if (el) {
+            el.classList.add('search-active');
+            searchRef.current.activeEl = el;
+            try {
+                el.scrollIntoView({ block: 'center', inline: 'nearest' });
+            } catch (e) {
+                el.scrollIntoView(true);
+            }
         }
 
         setDisplayInfo(`${idx + 1}/${matches.length}`);
@@ -245,7 +232,7 @@ export function NoteView() {
             <article
                 ref={contentRef}
                 className="note-content"
-                dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                dangerouslySetInnerHTML={htmlProp}
             />
         </div>
     );

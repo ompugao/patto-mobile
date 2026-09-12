@@ -1,11 +1,12 @@
 // Note operations for patto-mobile
 // Read, write, render notes using patto parser and mobile renderer
 
+use crate::image_proxy::ImageProxy;
 use crate::renderer::MobileHtmlRenderer;
 use patto::parser;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Rendered note with metadata
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,8 +45,18 @@ pub fn write_note(root: PathBuf, file_path: String, content: String) -> Result<(
 
 /// Render note to HTML using mobile-optimized renderer
 #[tauri::command]
-pub fn render_note(root: PathBuf, file_path: String) -> Result<RenderedNote, String> {
-    let full_path = root.join(&file_path);
+pub fn render_note(
+    root: PathBuf,
+    file_path: String,
+    proxy: tauri::State<'_, ImageProxy>,
+) -> Result<RenderedNote, String> {
+    // Images are served by the proxy, which only allows files under this root.
+    proxy.set_root(&root);
+    render_note_in(&root, &file_path)
+}
+
+fn render_note_in(root: &Path, file_path: &str) -> Result<RenderedNote, String> {
+    let full_path = root.join(file_path);
 
     if !full_path.exists() {
         return Err(format!("File not found: {}", file_path));
@@ -54,14 +65,7 @@ pub fn render_note(root: PathBuf, file_path: String) -> Result<RenderedNote, Str
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Parse the content
-    let parse_result = parser::parse_text(&content);
-
-    // Render to HTML using mobile renderer
-    let renderer = MobileHtmlRenderer::new(Some(root.to_string_lossy().to_string()));
-    let html = renderer
-        .render(&parse_result.ast)
-        .map_err(|e| format!("Failed to render: {}", e))?;
+    let html = render_html(&content, Some(root))?;
 
     // Get note name
     let name = full_path
@@ -70,21 +74,30 @@ pub fn render_note(root: PathBuf, file_path: String) -> Result<RenderedNote, Str
         .unwrap_or_default();
 
     Ok(RenderedNote {
-        path: file_path,
+        path: file_path.to_string(),
         name,
         html,
         raw_content: content,
     })
 }
 
-/// Render content without reading from file (for preview while editing)
+/// Render content without reading from file (for preview while editing).
+/// `root` lets local images resolve exactly as in `render_note`.
 #[tauri::command]
-pub fn render_content(content: String) -> Result<String, String> {
-    // Parse the content
-    let parse_result = parser::parse_text(&content);
+pub fn render_content(
+    root: Option<PathBuf>,
+    content: String,
+    proxy: tauri::State<'_, ImageProxy>,
+) -> Result<String, String> {
+    if let Some(root) = &root {
+        proxy.set_root(root);
+    }
+    render_html(&content, root.as_deref())
+}
 
-    // Render to HTML using mobile renderer
-    let renderer = MobileHtmlRenderer::new(None);
+fn render_html(content: &str, root: Option<&Path>) -> Result<String, String> {
+    let parse_result = parser::parse_text(content);
+    let renderer = MobileHtmlRenderer::new(root.map(|r| r.to_string_lossy().to_string()));
     renderer
         .render(&parse_result.ast)
         .map_err(|e| format!("Failed to render: {}", e))
@@ -154,76 +167,76 @@ fn extract_links_from_ast(node: &parser::AstNode, links: &mut Vec<LinkInfo>) {
     }
 }
 
-/// Get image as base64 data URL
-#[tauri::command]
-pub fn get_image_base64(path: String) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
-    let path = std::path::Path::new(&path);
-    if !path.exists() {
-        return Err(format!("Image not found: {:?}", path));
-    }
-
-    let data = fs::read(path).map_err(|e| format!("Failed to read image: {}", e))?;
-
-    // Determine MIME type from extension
-    let mime = match path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-
-    let base64 = STANDARD.encode(&data);
-    Ok(format!("data:{};base64,{}", mime, base64))
-}
-
-/// Get image raw bytes and mime type
-#[tauri::command]
-pub fn get_image_bytes(path: String) -> Result<(Vec<u8>, String), String> {
-    let path = std::path::Path::new(&path);
-    if !path.exists() {
-        return Err(format!("Image not found: {:?}", path));
-    }
-
-    let data = fs::read(path).map_err(|e| format!("Failed to read image: {}", e))?;
-
-    let mime = match path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-
-    Ok((data, mime.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "patto-mobile-notes-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
-    fn test_get_image_bytes() {
-        let temp_dir = std::env::temp_dir();
-        let test_file_path = temp_dir.join("test_image.png");
-        let dummy_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    fn render_note_numbers_lines() {
+        let root = temp_root("lines");
+        fs::write(
+            root.join("test_lines.pn"),
+            "Line 1\nLine 2\n\tNested Line 3\n",
+        )
+        .unwrap();
 
-        let mut file = fs::File::create(&test_file_path).unwrap();
-        file.write_all(&dummy_bytes).unwrap();
+        let rendered = render_note_in(&root, "test_lines.pn").unwrap();
+        assert!(rendered.html.contains("data-line-idx=\"0\""));
+        assert!(rendered.html.contains("data-line-idx=\"1\""));
+        assert!(rendered.html.contains("data-line-idx=\"2\""));
+        assert!(!rendered.html.contains("data-line-idx=\"3\""));
+        let _ = fs::remove_dir_all(&root);
+    }
 
-        let result = get_image_bytes(test_file_path.to_str().unwrap().to_string());
-        assert!(result.is_ok());
-        let (bytes, mime) = result.unwrap();
-        assert_eq!(bytes, dummy_bytes);
-        assert_eq!(mime, "image/png");
+    #[test]
+    fn render_note_emits_proxy_image_with_dimensions() {
+        let root = temp_root("img");
+        fs::create_dir_all(root.join("assets")).unwrap();
+        image::RgbImage::new(120, 80)
+            .save(root.join("assets/sample.png"))
+            .unwrap();
+        fs::write(
+            root.join("test_img.pn"),
+            "[@img \"a <caption>\" ./assets/sample.png]\n[@img \"missing\" ./assets/nope.png]\n[@img \"remote\" https://example.com/x.png]\n",
+        )
+        .unwrap();
 
-        let _ = fs::remove_file(test_file_path);
+        let html = render_note_in(&root, "test_img.pn").unwrap().html;
+        assert!(html.contains("localhost/"), "{html}");
+        assert!(
+            html.contains("sample.png") || html.contains("sample%2Epng"),
+            "{html}"
+        );
+        assert!(html.contains("width=\"120\" height=\"80\""), "{html}");
+        assert!(html.contains("alt=\"a &lt;caption&gt;\""), "{html}");
+        assert!(
+            html.contains("loading=\"lazy\" decoding=\"async\""),
+            "{html}"
+        );
+        // missing file: URL still emitted (404 shows alt), no dimensions
+        assert!(html.contains("alt=\"missing\" loading"), "{html}");
+        // remote URLs pass through untouched
+        assert!(html.contains("src=\"https://example.com/x.png\""), "{html}");
+        assert!(!html.contains("asset.localhost"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn render_content_without_root_keeps_relative_src() {
+        let html = render_html("[@img \"x\" ./assets/a.png]\n", None).unwrap();
+        assert!(html.contains("src=\"./assets/a.png\""), "{html}");
     }
 }
-
-
