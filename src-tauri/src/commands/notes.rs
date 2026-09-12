@@ -226,8 +226,18 @@ mod tests {
             html.contains("loading=\"lazy\" decoding=\"async\""),
             "{html}"
         );
+        assert!(html.contains("<figure class=\"patto-figure\">"), "{html}");
+        assert!(
+            html.contains("<figcaption class=\"patto-figcaption\">a &lt;caption&gt;</figcaption>"),
+            "{html}"
+        );
+        assert!(html.contains("&amp;full=1\" width=\"120\""), "{html}");
         // missing file: URL still emitted (404 shows alt), no dimensions
-        assert!(html.contains("alt=\"missing\" loading"), "{html}");
+        assert!(html.contains("alt=\"missing\" data-full="), "{html}");
+        assert!(
+            !html.contains("nope%2Epng?v=0&amp;full=1\" width="),
+            "{html}"
+        );
         // remote URLs pass through untouched
         assert!(html.contains("src=\"https://example.com/x.png\""), "{html}");
         assert!(!html.contains("asset.localhost"));

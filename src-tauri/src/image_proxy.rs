@@ -129,7 +129,7 @@ impl ImageProxy {
         }
     }
 
-    async fn serve(&self, requested: PathBuf) -> Result<Served, ProxyError> {
+    async fn serve(&self, requested: PathBuf, full: bool) -> Result<Served, ProxyError> {
         let root = self
             .0
             .root
@@ -152,7 +152,7 @@ impl ImageProxy {
                 .map_err(|e| ProxyError::Internal(e.to_string()))?;
             let cache_dir = self.0.cache_dir.clone();
             let path = requested.clone();
-            tauri::async_runtime::spawn_blocking(move || produce(&root, &cache_dir, &path))
+            tauri::async_runtime::spawn_blocking(move || produce(&root, &cache_dir, &path, full))
                 .await
                 .map_err(|e| ProxyError::Internal(e.to_string()))?
         };
@@ -170,15 +170,23 @@ impl ImageProxy {
 /// URL the renderer embeds in HTML. Mirrors `convertFileSrc` in Tauri's core.js:
 /// `pimg://localhost/<encoded>` everywhere except Windows/Android, which use
 /// `http://pimg.localhost/<encoded>` (wry maps it back to `pimg://` before `handle`).
-pub fn image_url(abs_path: &Path, version: u64) -> String {
+/// `full` requests the untouched original instead of the downscaled version.
+pub fn image_url(abs_path: &Path, version: u64, full: bool) -> String {
     let path_str = abs_path.to_string_lossy();
     let encoded =
         percent_encoding::utf8_percent_encode(&path_str, percent_encoding::NON_ALPHANUMERIC);
+    let full = if full { "&full=1" } else { "" };
     if cfg!(any(windows, target_os = "android")) {
-        format!("http://{SCHEME}.localhost/{encoded}?v={version:x}")
+        format!("http://{SCHEME}.localhost/{encoded}?v={version:x}{full}")
     } else {
-        format!("{SCHEME}://localhost/{encoded}?v={version:x}")
+        format!("{SCHEME}://localhost/{encoded}?v={version:x}{full}")
     }
+}
+
+fn wants_full(query: Option<&str>) -> bool {
+    query
+        .map(|q| q.split('&').any(|kv| kv == "full=1"))
+        .unwrap_or(false)
 }
 
 /// Header-only probe; `None` if the file does not exist.
@@ -206,10 +214,11 @@ pub fn handle<R: Runtime>(
     let decoded = percent_encoding::percent_decode_str(raw.strip_prefix('/').unwrap_or(raw))
         .decode_utf8_lossy()
         .into_owned();
+    let full = wants_full(request.uri().query());
 
     tauri::async_runtime::spawn(async move {
         let proxy = app.state::<ImageProxy>().inner().clone();
-        let response = match proxy.serve(PathBuf::from(decoded)).await {
+        let response = match proxy.serve(PathBuf::from(decoded), full).await {
             Ok(served) => ok_response(served),
             Err(e) => error_response(e),
         };
@@ -242,7 +251,13 @@ fn error_response(err: ProxyError) -> Response<Vec<u8>> {
 }
 
 /// Synchronous worker: validate the path, then serve raw bytes or a cached downscale.
-fn produce(root: &Path, cache_dir: &Path, requested: &Path) -> Result<Served, ProxyError> {
+/// `full` skips downscaling (used by the lightbox to show the original).
+fn produce(
+    root: &Path,
+    cache_dir: &Path,
+    requested: &Path,
+    full: bool,
+) -> Result<Served, ProxyError> {
     // canonicalize resolves `..` and symlinks, so `starts_with` is a real containment check.
     let canon = requested.canonicalize().map_err(|_| ProxyError::NotFound)?;
     if !canon.starts_with(root) {
@@ -264,8 +279,9 @@ fn produce(root: &Path, cache_dir: &Path, requested: &Path) -> Result<Served, Pr
             .map_err(|_| ProxyError::NotFound)
     };
 
-    // SVG is vector; GIF may be animated. Serve both untouched.
-    if ext == "svg" || ext == "gif" {
+    // SVG is vector; GIF may be animated. Serve both untouched, as is any explicit
+    // request for the original.
+    if full || ext == "svg" || ext == "gif" {
         return raw();
     }
     if let Ok(size) = imagesize::size(&canon) {
@@ -421,7 +437,7 @@ mod tests {
     #[test]
     fn image_url_round_trips_through_percent_decoding() {
         let path = Path::new("/home/me/ノート/assets/a b&c.png");
-        let url = image_url(path, 0x1234);
+        let url = image_url(path, 0x1234, false);
         assert!(
             url.starts_with(&format!("{SCHEME}://localhost/"))
                 || url.starts_with(&format!("http://{SCHEME}.localhost/"))
@@ -438,6 +454,11 @@ mod tests {
             .unwrap();
         assert_eq!(decoded, path.to_string_lossy());
         assert!(url.ends_with("?v=1234"));
+        let full = image_url(path, 0x1234, true);
+        assert!(full.ends_with("?v=1234&full=1"));
+        assert!(wants_full(Some("v=1234&full=1")));
+        assert!(!wants_full(Some("v=1234")));
+        assert!(!wants_full(None));
     }
 
     #[test]
@@ -448,7 +469,7 @@ mod tests {
         let src = root.join("big.png");
         write_png(&src, 3000, 2000);
 
-        let served = produce(&root, &cache, &src).unwrap();
+        let served = produce(&root, &cache, &src, false).unwrap();
         assert_eq!(served.mime, "image/jpeg");
         assert_eq!(&served.bytes[..2], &[0xFF, 0xD8]);
         let decoded = image::load_from_memory(&served.bytes).unwrap();
@@ -458,8 +479,13 @@ mod tests {
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path().extension().unwrap(), "jpg");
 
-        let again = produce(&root, &cache, &src).unwrap();
+        let again = produce(&root, &cache, &src, false).unwrap();
         assert_eq!(again.bytes, served.bytes);
+
+        // full=1 returns the untouched original
+        let original = produce(&root, &cache, &src, true).unwrap();
+        assert_eq!(original.mime, "image/png");
+        assert_eq!(original.bytes, fs::read(&src).unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -473,10 +499,10 @@ mod tests {
         let svg = root.join("v.svg");
         fs::write(&svg, "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
 
-        let served = produce(&root, &cache, &png).unwrap();
+        let served = produce(&root, &cache, &png, false).unwrap();
         assert_eq!(served.mime, "image/png");
         assert_eq!(served.bytes, fs::read(&png).unwrap());
-        let served = produce(&root, &cache, &svg).unwrap();
+        let served = produce(&root, &cache, &svg, false).unwrap();
         assert_eq!(served.mime, "image/svg+xml");
         assert_eq!(served.bytes, fs::read(&svg).unwrap());
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
@@ -494,7 +520,7 @@ mod tests {
         write_png(&secret, 10, 10);
 
         assert_eq!(
-            produce(&root, &cache, &secret).unwrap_err(),
+            produce(&root, &cache, &secret, false).unwrap_err(),
             ProxyError::Forbidden
         );
         let traversal = root
@@ -504,20 +530,20 @@ mod tests {
             .join(outside.file_name().unwrap())
             .join("secret.png");
         assert_eq!(
-            produce(&root, &cache, &traversal).unwrap_err(),
+            produce(&root, &cache, &traversal, false).unwrap_err(),
             ProxyError::Forbidden
         );
         assert_eq!(
-            produce(&root, &cache, &root.join("missing.png")).unwrap_err(),
+            produce(&root, &cache, &root.join("missing.png"), false).unwrap_err(),
             ProxyError::NotFound
         );
         assert_eq!(
-            produce(&root, &cache, &root.join("notes.pn")).unwrap_err(),
+            produce(&root, &cache, &root.join("notes.pn"), false).unwrap_err(),
             ProxyError::NotFound
         );
         fs::write(root.join("notes.pn"), "x").unwrap();
         assert_eq!(
-            produce(&root, &cache, &root.join("notes.pn")).unwrap_err(),
+            produce(&root, &cache, &root.join("notes.pn"), false).unwrap_err(),
             ProxyError::Forbidden
         );
         let _ = fs::remove_dir_all(&root);
