@@ -5,6 +5,7 @@
 import { useStore, View } from '../lib/store';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Lightbox } from './Lightbox';
 import './NoteView.css';
 
 export function NoteView() {
@@ -14,6 +15,7 @@ export function NoteView() {
         toggleEdit,
         goBack,
         openNote,
+        openLightbox,
     } = useStore();
 
     const contentRef = useRef(null);
@@ -42,6 +44,14 @@ export function NoteView() {
         if (!contentRef.current) return;
 
         const handleClick = async (e) => {
+            // Tap on an image: show the original in the lightbox
+            const img = e.target.closest('img.patto-image');
+            if (img) {
+                e.preventDefault();
+                openLightbox({ src: img.dataset.full || img.currentSrc || img.src, alt: img.alt });
+                return;
+            }
+
             const link = e.target.closest('a');
             if (!link) return;
 
@@ -62,7 +72,7 @@ export function NoteView() {
 
         contentRef.current.addEventListener('click', handleClick);
         return () => contentRef.current?.removeEventListener('click', handleClick);
-    }, [renderedHtml, openNote]);
+    }, [renderedHtml, openNote, openLightbox]);
 
     // Focus input when search opens
     useEffect(() => {
@@ -234,6 +244,8 @@ export function NoteView() {
                 className="note-content"
                 dangerouslySetInnerHTML={htmlProp}
             />
+
+            <Lightbox />
         </div>
     );
 }

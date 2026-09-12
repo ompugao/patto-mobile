@@ -37,6 +37,9 @@ export const useStore = create(
             renderedHtml: '',
             isEditing: false,
 
+            // === Lightbox (full-size image viewer over the note view) ===
+            lightbox: null, // { src, alt } | null
+
             // === Tasks ===
             tasks: null,
             isLoadingTasks: false,
@@ -170,6 +173,18 @@ export const useStore = create(
                 } catch (error) {
                     console.error('Failed to open note:', error);
                 }
+            },
+
+            // Open the full-size image viewer. Pushes a history entry so the
+            // hardware/browser back button closes it instead of leaving the note.
+            openLightbox: (image) => {
+                set({ lightbox: image });
+                history.pushState({ view: get().currentView, lightbox: true }, '', '');
+            },
+
+            // Close the viewer by popping its history entry (see App popstate handler)
+            closeLightbox: () => {
+                if (get().lightbox) history.back();
             },
 
             // Toggle edit mode

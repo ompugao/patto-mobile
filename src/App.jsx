@@ -24,6 +24,12 @@ function App() {
     initializeHistory();
 
     const handlePopState = async (event) => {
+      // A back press while the image viewer is open only closes the viewer
+      if (useStore.getState().lightbox) {
+        useStore.setState({ lightbox: null });
+        return;
+      }
+
       // Prevent default behavior and handle navigation ourselves
       const navigated = await goBack();
 

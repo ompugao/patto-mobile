@@ -253,12 +253,24 @@
 }
 
 /* Images */
+.patto-figure {
+    margin: 8px 0;
+}
+
 .patto-image {
     max-width: 100%;
     height: auto;
     border-radius: 8px;
-    margin: 8px 0;
     display: block;
+    cursor: pointer;
+}
+
+.patto-figcaption {
+    margin-top: 4px;
+    font-size: 0.85em;
+    color: #a9a9a9;
+    text-align: center;
+    word-break: break-word;
 }
 
 /* Video embeds */

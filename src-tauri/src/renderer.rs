@@ -160,27 +160,42 @@ impl MobileHtmlRenderer {
                 // Local images go through the `pimg` proxy (downscaled + cached).
                 // width/height come from the file header so layout is stable
                 // before the image loads (no jumps while scrolling/searching).
-                let (resolved_src, dimensions) = match self.resolve_image_path(src) {
-                    ImageSource::Remote(url) => (url, None),
-                    ImageSource::Local(abs) => match image_proxy::probe(&abs) {
-                        Some(probe) => (
-                            image_proxy::image_url(&abs, probe.version),
-                            probe.dimensions,
-                        ),
-                        None => (image_proxy::image_url(&abs, 0), None),
-                    },
-                    ImageSource::Unresolved(raw) => (raw, None),
+                // `data-full` points at the untouched original for the lightbox.
+                let (resolved_src, full_src, dimensions) = match self.resolve_image_path(src) {
+                    ImageSource::Remote(url) => (url, None, None),
+                    ImageSource::Local(abs) => {
+                        let probe = image_proxy::probe(&abs);
+                        let version = probe.as_ref().map(|p| p.version).unwrap_or(0);
+                        (
+                            image_proxy::image_url(&abs, version, false),
+                            Some(image_proxy::image_url(&abs, version, true)),
+                            probe.and_then(|p| p.dimensions),
+                        )
+                    }
+                    ImageSource::Unresolved(raw) => (raw, None, None),
                 };
+                write!(output, "<figure class=\"patto-figure\">")?;
                 write!(
                     output,
                     "<img class=\"patto-image\" src=\"{}\" alt=\"{}\"",
                     html_escape(&resolved_src),
                     alt_text
                 )?;
+                if let Some(full) = full_src {
+                    write!(output, " data-full=\"{}\"", html_escape(&full))?;
+                }
                 if let Some((w, h)) = dimensions {
                     write!(output, " width=\"{}\" height=\"{}\"", w, h)?;
                 }
                 write!(output, " loading=\"lazy\" decoding=\"async\"/>")?;
+                if !alt_text.is_empty() {
+                    write!(
+                        output,
+                        "<figcaption class=\"patto-figcaption\">{}</figcaption>",
+                        alt_text
+                    )?;
+                }
+                write!(output, "</figure>")?;
             }
             AstNodeKind::WikiLink { link, anchor } => {
                 let href = if let Some(anchor) = anchor {
