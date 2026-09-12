@@ -17,7 +17,38 @@ implemented in `src-tauri/src/image_proxy.rs`: anything larger than 1600 px on
 its long edge is downscaled once, cached under the app cache dir
 (`~/.cache/com.sifi.patto-mobile/img` on Linux) and streamed from there.
 No image bytes cross the IPC bridge. Only files under the opened workspace are
-served.
+served. Tapping an image opens the original (`?full=1`) in a lightbox.
+
+The protocol handler never decodes inside a request: on Android, wry blocks the
+WebView's shared request thread until a handler responds, and Tauri IPC uses
+that same thread, so a slow decode would stall every `invoke`. Large images
+that are not cached yet are rendered without `src`; `src/lib/imageLoader.js`
+asks Rust to decode them in the background (`prepare_images`) as they approach
+the viewport and fills in `src` on the `image-ready` event.
+
+### Soft keyboard
+
+`AndroidManifest.xml` uses `windowSoftInputMode="adjustPan"`: with the default
+`adjustResize`, every frame of the keyboard animation resizes the WebView and
+relayouts the whole note (~300 ms per frame on a 12k-line note, i.e. several
+seconds to open the search box). The in-note search bar likewise overlays the
+content instead of pushing it down.
+
+### Large notes
+
+Lines are plain block boxes on purpose: `content-visibility: auto` looked like a
+win for 12k-line notes but made the forced layout that focusing an input
+triggers (IME state) churn through thousands of lock/unlock cycles (~10 s per
+first focus on Android). YouTube links render as thumbnail facades and only
+load the player iframe when tapped — a note with dozens of live players makes
+every layout and keyboard interaction crawl.
+
+### Note navigation
+
+`src/lib/noteCache.js` keeps one scroll container per recently opened note
+mounted inside the note view (only the active one is visible). Wikilink and
+back navigation therefore never rebuild the DOM, and each note keeps its exact
+scroll position; history entries store the scroll offset to restore.
 
 ## Android
 

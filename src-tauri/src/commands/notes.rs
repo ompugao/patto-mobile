@@ -52,10 +52,14 @@ pub fn render_note(
 ) -> Result<RenderedNote, String> {
     // Images are served by the proxy, which only allows files under this root.
     proxy.set_root(&root);
-    render_note_in(&root, &file_path)
+    render_note_in(&root, &file_path, Some(&proxy))
 }
 
-fn render_note_in(root: &Path, file_path: &str) -> Result<RenderedNote, String> {
+fn render_note_in(
+    root: &Path,
+    file_path: &str,
+    proxy: Option<&ImageProxy>,
+) -> Result<RenderedNote, String> {
     let full_path = root.join(file_path);
 
     if !full_path.exists() {
@@ -65,7 +69,7 @@ fn render_note_in(root: &Path, file_path: &str) -> Result<RenderedNote, String> 
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    let html = render_html(&content, Some(root))?;
+    let html = render_html(&content, Some(root), proxy)?;
 
     // Get note name
     let name = full_path
@@ -92,12 +96,16 @@ pub fn render_content(
     if let Some(root) = &root {
         proxy.set_root(root);
     }
-    render_html(&content, root.as_deref())
+    render_html(&content, root.as_deref(), Some(&proxy))
 }
 
-fn render_html(content: &str, root: Option<&Path>) -> Result<String, String> {
+fn render_html(
+    content: &str,
+    root: Option<&Path>,
+    proxy: Option<&ImageProxy>,
+) -> Result<String, String> {
     let parse_result = parser::parse_text(content);
-    let renderer = MobileHtmlRenderer::new(root.map(|r| r.to_string_lossy().to_string()));
+    let renderer = MobileHtmlRenderer::new(root.map(|r| r.to_string_lossy().to_string()), proxy);
     renderer
         .render(&parse_result.ast)
         .map_err(|e| format!("Failed to render: {}", e))
@@ -193,7 +201,7 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = render_note_in(&root, "test_lines.pn").unwrap();
+        let rendered = render_note_in(&root, "test_lines.pn", None).unwrap();
         assert!(rendered.html.contains("data-line-idx=\"0\""));
         assert!(rendered.html.contains("data-line-idx=\"1\""));
         assert!(rendered.html.contains("data-line-idx=\"2\""));
@@ -208,13 +216,21 @@ mod tests {
         image::RgbImage::new(120, 80)
             .save(root.join("assets/sample.png"))
             .unwrap();
+        image::RgbImage::new(2400, 1800)
+            .save(root.join("assets/big.png"))
+            .unwrap();
         fs::write(
             root.join("test_img.pn"),
-            "[@img \"a <caption>\" ./assets/sample.png]\n[@img \"missing\" ./assets/nope.png]\n[@img \"remote\" https://example.com/x.png]\n",
+            "[@img \"a <caption>\" ./assets/sample.png]\n[@img \"missing\" ./assets/nope.png]\n[@img \"remote\" https://example.com/x.png]\n[@img \"big\" ./assets/big.png]\n",
         )
         .unwrap();
 
-        let html = render_note_in(&root, "test_img.pn").unwrap().html;
+        let proxy = ImageProxy::new(root.join("cache"));
+        proxy.set_root(&root);
+
+        let html = render_note_in(&root, "test_img.pn", Some(&proxy))
+            .unwrap()
+            .html;
         assert!(html.contains("localhost/"), "{html}");
         assert!(
             html.contains("sample.png") || html.contains("sample%2Epng"),
@@ -232,8 +248,21 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("&amp;full=1\" width=\"120\""), "{html}");
+        // large + uncached: no src yet, prepared on demand
+        assert!(
+            html.contains("alt=\"big\" data-pending-src=\"pimg://"),
+            "{html}"
+        );
+        assert!(html.contains("data-prepare=\""), "{html}");
+        assert!(!html.contains("alt=\"big\" src="), "{html}");
+        // once cached it is inlined
+        tauri::async_runtime::block_on(proxy.prepare(root.join("assets/big.png"))).unwrap();
+        let html2 = render_note_in(&root, "test_img.pn", Some(&proxy))
+            .unwrap()
+            .html;
+        assert!(html2.contains("alt=\"big\" src=\"pimg://"), "{html2}");
         // missing file: URL still emitted (404 shows alt), no dimensions
-        assert!(html.contains("alt=\"missing\" data-full="), "{html}");
+        assert!(html.contains("alt=\"missing\" src=\"pimg://"), "{html}");
         assert!(
             !html.contains("nope%2Epng?v=0&amp;full=1\" width="),
             "{html}"
@@ -245,8 +274,27 @@ mod tests {
     }
 
     #[test]
+    fn youtube_links_render_as_click_to_load_facade() {
+        let html = render_html(
+            "[video https://www.youtube.com/watch?v=abc123XYZ&t=1]\n[clip https://youtu.be/def456]\n",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            html.contains("class=\"video-facade\" data-youtube-id=\"abc123XYZ\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("i.ytimg.com/vi/def456/hqdefault.jpg"),
+            "{html}"
+        );
+        assert!(!html.contains("<iframe"), "{html}");
+    }
+
+    #[test]
     fn render_content_without_root_keeps_relative_src() {
-        let html = render_html("[@img \"x\" ./assets/a.png]\n", None).unwrap();
+        let html = render_html("[@img \"x\" ./assets/a.png]\n", None, None).unwrap();
         assert!(html.contains("src=\"./assets/a.png\""), "{html}");
     }
 }

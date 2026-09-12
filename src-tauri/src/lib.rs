@@ -48,6 +48,7 @@ pub fn run() {
             render_note,
             render_content,
             extract_links,
+            image_proxy::prepare_images,
             // Task commands
             get_all_tasks,
             get_file_tasks,

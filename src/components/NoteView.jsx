@@ -1,10 +1,13 @@
-// NoteView component - displays rendered note content with simple search
-// Images are served natively by the Rust `pimg` URI scheme (see src-tauri/src/image_proxy.rs),
-// so nothing is done for them here. Search runs against a lazily built text index.
+// NoteView component - displays a rendered note with in-page search.
+// Each opened note keeps its own scroll container inside the host element (see
+// noteCache); switching notes only toggles which one is visible, so navigation is
+// instant and scroll positions survive. Images are served by the Rust `pimg` URI
+// scheme; large ones are decoded on demand via imageLoader.
 
-import { useStore, View } from '../lib/store';
+import { useStore } from '../lib/store';
+import * as noteCache from '../lib/noteCache';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Lightbox } from './Lightbox';
 import './NoteView.css';
 
@@ -12,38 +15,76 @@ export function NoteView() {
     const {
         currentNote,
         renderedHtml,
+        noteTarget,
         toggleEdit,
         goBack,
         openNote,
         openLightbox,
     } = useStore();
 
-    const contentRef = useRef(null);
+    // Host for the per-note scroll containers (children managed by noteCache, not React)
+    const hostRef = useRef(null);
     const [showSearch, setShowSearch] = useState(false);
     const inputRef = useRef(null);
 
-    // Search state: store query, current index, total matches, cached matching elements, and active element reference
-    const searchRef = useRef({ query: '', idx: 0, total: 0, matches: [], activeEl: null });
-    // Lowercased text of every .patto-line, built once per rendered HTML on first search
-    const indexRef = useRef({ html: null, lines: [] });
+    // Search state: query, current index, cached matching lines, active element
+    const searchRef = useRef({ query: '', idx: 0, matches: [], activeEl: null });
     const [displayInfo, setDisplayInfo] = useState('');
-    // Keep the same object across renders: React re-assigns innerHTML whenever this
-    // prop's identity changes, which would rebuild the whole note DOM on every
-    // search-counter update (and drop the highlighted element).
-    const htmlProp = useMemo(() => ({ __html: renderedHtml }), [renderedHtml]);
 
-    // Rendered HTML changed (navigation, save): drop stale element refs and highlights
-    useEffect(() => {
-        indexRef.current = { html: null, lines: [] };
-        searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
+    // Show the current note's scroller (built once per rendered HTML)
+    useLayoutEffect(() => {
+        if (!hostRef.current || !currentNote) return;
+        noteCache.activate(hostRef.current, currentNote);
+
+        // Different content: drop stale highlight/search state
+        clearHighlights();
+        searchRef.current = { query: '', idx: 0, matches: [], activeEl: null };
         setDisplayInfo('');
-    }, [renderedHtml]);
+    }, [currentNote, renderedHtml]);
 
-    // Handle link clicks
+    // Scroll to the requested position (restored history position or wikilink anchor).
+    // Applied twice: immediately and after a frame, once lazily-rendered lines have sized.
+    useLayoutEffect(() => {
+        const scroller = noteCache.activeScroller();
+        if (!scroller || !noteTarget) return;
+
+        const apply = () => {
+            if (noteTarget.anchor) {
+                const el = scroller.querySelector(`#${CSS.escape(noteTarget.anchor)}`);
+                if (el) {
+                    el.scrollIntoView({ block: 'start' });
+                    return;
+                }
+            }
+            scroller.scrollTop = noteTarget.scrollTop ?? 0;
+        };
+        apply();
+        const frame = requestAnimationFrame(apply);
+        return () => cancelAnimationFrame(frame);
+    }, [noteTarget, currentNote, renderedHtml]);
+
+    // Handle taps on links and images (delegated; the host element is stable)
     useEffect(() => {
-        if (!contentRef.current) return;
+        const scroller = hostRef.current;
+        if (!scroller) return;
 
         const handleClick = async (e) => {
+            // Tap on a video thumbnail: load the YouTube player in place
+            const facade = e.target.closest('.video-facade');
+            if (facade) {
+                e.preventDefault();
+                const embed = document.createElement('div');
+                embed.className = 'video-embed';
+                const iframe = document.createElement('iframe');
+                iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(facade.dataset.youtubeId)}?autoplay=1`;
+                iframe.setAttribute('frameborder', '0');
+                iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+                iframe.setAttribute('allowfullscreen', '');
+                embed.appendChild(iframe);
+                facade.replaceWith(embed);
+                return;
+            }
+
             // Tap on an image: show the original in the lightbox
             const img = e.target.closest('img.patto-image');
             if (img) {
@@ -60,19 +101,22 @@ export function NoteView() {
             if (!href) return;
 
             if (href.startsWith('http://') || href.startsWith('https://')) {
-                try { await openUrl(href); } catch (e) { }
+                try { await openUrl(href); } catch (err) { }
                 return;
             }
 
-            const [noteName] = href.split('#');
+            const [noteName, anchor] = href.split('#');
             if (noteName) {
-                openNote(noteName.endsWith('.pn') ? noteName : `${noteName}.pn`);
+                openNote(noteName.endsWith('.pn') ? noteName : `${noteName}.pn`, anchor || null);
+            } else if (anchor) {
+                // Same-note anchor
+                noteCache.activeScroller()?.querySelector(`#${CSS.escape(anchor)}`)?.scrollIntoView({ block: 'start' });
             }
         };
 
-        contentRef.current.addEventListener('click', handleClick);
-        return () => contentRef.current?.removeEventListener('click', handleClick);
-    }, [renderedHtml, openNote, openLightbox]);
+        scroller.addEventListener('click', handleClick);
+        return () => scroller.removeEventListener('click', handleClick);
+    }, [openNote, openLightbox]);
 
     // Focus input when search opens
     useEffect(() => {
@@ -89,25 +133,11 @@ export function NoteView() {
         }
     };
 
-    // Build (once per rendered HTML) the text index: one DOM pass, no layout
-    const getIndex = () => {
-        if (!contentRef.current) return [];
-        if (indexRef.current.html !== renderedHtml) {
-            const els = contentRef.current.querySelectorAll('.patto-line');
-            const lines = new Array(els.length);
-            for (let i = 0; i < els.length; i++) {
-                lines[i] = { el: els[i], idx: els[i].getAttribute('data-line-idx'), text: els[i].textContent.toLowerCase() };
-            }
-            indexRef.current = { html: renderedHtml, lines };
-        }
-        return indexRef.current.lines;
-    };
-
-    // Find all matching lines from the in-memory index
+    // Find all matching lines from the cached in-memory index
     const computeMatches = (query) => {
-        if (!query) return [];
+        if (!query || !currentNote) return [];
         const found = [];
-        for (const line of getIndex()) {
+        for (const line of noteCache.getSearchIndex(currentNote)) {
             if (line.text.includes(query)) found.push(line);
         }
         return found;
@@ -122,14 +152,13 @@ export function NoteView() {
         idx = ((idx % matches.length) + matches.length) % matches.length;
         searchRef.current.idx = idx;
 
-        // Remove active class from previous active element
         clearHighlights();
 
         // Highlight current match (re-find by data-line-idx if the element was replaced)
         const match = matches[idx];
         let el = match.el;
         if (!el || !el.isConnected) {
-            el = contentRef.current?.querySelector(`[data-line-idx="${match.idx}"]`);
+            el = noteCache.activeScroller()?.querySelector(`[data-line-idx="${match.idx}"]`);
             match.el = el;
         }
         if (el) {
@@ -148,9 +177,9 @@ export function NoteView() {
     // Find - starts new search and caches matches
     const doFind = () => {
         const query = inputRef.current?.value?.trim().toLowerCase();
-        if (!query || !contentRef.current) {
+        if (!query) {
             clearHighlights();
-            searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
+            searchRef.current = { query: '', idx: 0, matches: [], activeEl: null };
             setDisplayInfo('');
             return;
         }
@@ -159,7 +188,6 @@ export function NoteView() {
         const matches = computeMatches(query);
         searchRef.current.query = query;
         searchRef.current.matches = matches;
-        searchRef.current.total = matches.length;
 
         if (matches.length > 0) {
             navigateToIndex(0);
@@ -169,13 +197,11 @@ export function NoteView() {
         }
     };
 
-    // Go to next match
     const goNext = () => {
         if (!searchRef.current.query || searchRef.current.matches.length === 0) return;
         navigateToIndex(searchRef.current.idx + 1);
     };
 
-    // Go to previous match
     const goPrev = () => {
         if (!searchRef.current.query || searchRef.current.matches.length === 0) return;
         navigateToIndex(searchRef.current.idx - 1);
@@ -204,7 +230,7 @@ export function NoteView() {
     const closeSearch = () => {
         setShowSearch(false);
         clearHighlights();
-        searchRef.current = { query: '', idx: 0, total: 0, matches: [], activeEl: null };
+        searchRef.current = { query: '', idx: 0, matches: [], activeEl: null };
         setDisplayInfo('');
     };
 
@@ -218,32 +244,33 @@ export function NoteView() {
                 <button className="edit-btn" onClick={toggleEdit}>Edit</button>
             </header>
 
-            {showSearch && (
-                <div className="search-bar">
-                    <input
-                        ref={inputRef}
-                        type="text"
-                        className="search-input"
-                        placeholder="Search..."
-                        onKeyDown={handleKeyDown}
-                    />
-                    <button type="button" className="search-action-btn" onClick={doFind}>🔍</button>
-                    <span className="match-info">{displayInfo}</span>
-                    <button type="button" className="search-action-btn" onClick={goPrev}>↑</button>
-                    <button type="button" className="search-action-btn" onClick={goNext}>↓</button>
-                    <button type="button" className="search-close-btn" onClick={closeSearch}>✕</button>
-                </div>
-            )}
-
             {!showSearch && (
                 <button className="search-toggle-btn" onClick={() => setShowSearch(true)}>🔍</button>
             )}
 
-            <article
-                ref={contentRef}
-                className="note-content"
-                dangerouslySetInnerHTML={htmlProp}
-            />
+            {/* The search bar overlays the content instead of pushing it down: resizing a
+                10k+-line note costs hundreds of ms per frame. */}
+            <div className={`note-body-area${showSearch ? ' searching' : ''}`}>
+                {showSearch && (
+                    <div className="search-bar">
+                        <input
+                            ref={inputRef}
+                            type="text"
+                            className="search-input"
+                            placeholder="Search..."
+                            onKeyDown={handleKeyDown}
+                        />
+                        <button type="button" className="search-action-btn" onClick={doFind}>🔍</button>
+                        <span className="match-info">{displayInfo}</span>
+                        <button type="button" className="search-action-btn" onClick={goPrev}>↑</button>
+                        <button type="button" className="search-action-btn" onClick={goNext}>↓</button>
+                        <button type="button" className="search-close-btn" onClick={closeSearch}>✕</button>
+                    </div>
+                )}
+
+                {/* Children (one scroller per cached note) are managed by noteCache; keep this element childless in JSX */}
+                <div ref={hostRef} className="note-content" />
+            </div>
 
             <Lightbox />
         </div>

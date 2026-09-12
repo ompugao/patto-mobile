@@ -51,6 +51,10 @@ android {
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
+            // Same key as release so a debug APK installs over a release one (keeps app data)
+            if (rootProject.file("keystore.properties").exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             packaging {                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
                 jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
                 jniLibs.keepDebugSymbols.add("*/x86/*.so")

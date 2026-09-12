@@ -56,12 +56,59 @@
     opacity: 0.9;
 }
 
-.note-content {
+.note-body-area {
     flex: 1;
-    padding: 16px;
-    overflow-y: auto;
+    position: relative;
+    overflow: hidden;
+}
+
+.note-content {
+    position: absolute;
+    inset: 0;
     color: #f1f1f1;
     line-height: 1.6;
+}
+
+/* Search bar floats over the top of the content; keep matches out from under it */
+.note-body-area .search-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 5;
+}
+
+.note-body-area.searching .note-scroller {
+    scroll-padding-top: 64px;
+}
+
+/* One scroll container per cached note; only the active one is shown.
+   Hidden ones keep their layout and scroll position (opacity/z-index are
+   compositor-only, unlike display/visibility which invalidate 10k+ nodes). */
+.note-scroller {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    padding: 16px;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.note-scroller.active {
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 1;
+}
+
+/* Large images waiting for their background decode */
+.patto-image:not([src]) {
+    background: #16213e;
+}
+
+.patto-image-missing {
+    min-height: 2em;
+    outline: 1px dashed #0f3460;
 }
 
 /* Patto root and line structure */
@@ -76,9 +123,9 @@
     position: relative;
     min-height: 1.4em;
     /* Ensures empty lines have height */
-    /* Skip layout/paint for off-screen lines (journal.pn has >12k of them) */
-    content-visibility: auto;
-    contain-intrinsic-size: auto 1.6em;
+    /* NOTE: no `content-visibility: auto` here. On a 12k-line note it makes the
+       forced layout that focusing an input triggers (IME text-input state) churn
+       through thousands of lock/unlock cycles: ~10 s per first focus on Android. */
 }
 
 /* Empty line styling - show as blank space */
@@ -273,7 +320,42 @@
     word-break: break-word;
 }
 
-/* Video embeds */
+/* Video embeds: a thumbnail facade; the YouTube player iframe loads only on tap */
+.video-facade {
+    position: relative;
+    width: 100%;
+    max-width: 560px;
+    aspect-ratio: 16 / 9;
+    margin: 0.5em 0;
+    background: #000 center / cover no-repeat;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.video-facade::after {
+    content: "▶";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 64px;
+    height: 44px;
+    line-height: 44px;
+    text-align: center;
+    border-radius: 10px;
+    background: rgba(233, 69, 96, 0.9);
+    color: #fff;
+    font-size: 1.3rem;
+}
+
+.video-facade img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
 .video-embed {
     position: relative;
     width: 100%;
