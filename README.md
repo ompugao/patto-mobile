@@ -43,6 +43,15 @@ first focus on Android). YouTube links render as thumbnail facades and only
 load the player iframe when tapped — a note with dozens of live players makes
 every layout and keyboard interaction crawl.
 
+### Editor
+
+The editor is CodeMirror 6 (`src/components/NoteEditor.jsx`): it renders only
+the visible lines, so a 12k-line note opens for editing instantly, whereas a
+`<textarea>` needed ~1 s to lay out the same text. Tab inserts a literal tab
+(patto nesting). The editor overlays the note view and stays mounted while
+previewing; the note view itself stays mounted while editing, so switching
+between the two never rebuilds the note DOM.
+
 ### Note navigation
 
 `src/lib/noteCache.js` keeps one scroll container per recently opened note
