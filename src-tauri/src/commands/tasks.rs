@@ -1,7 +1,7 @@
 // Task aggregation for patto-mobile
 // Gathers tasks from all notes and categorizes by deadline
 
-use chrono::{Local, NaiveDate};
+use chrono::Local;
 use patto::parser::{
     self, AstNode, AstNodeKind, Deadline, Property, TaskStatus as PattoTaskStatus,
 };
@@ -173,11 +173,13 @@ fn extract_tasks_from_ast(
                 status,
                 due,
                 location,
+                ..
             } = prop
             {
                 let status_str = match status {
                     PattoTaskStatus::Todo => "todo",
                     PattoTaskStatus::Doing => "doing",
+                    PattoTaskStatus::Paused => "paused",
                     PattoTaskStatus::Done => "done",
                 };
 
